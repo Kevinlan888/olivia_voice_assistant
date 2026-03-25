@@ -1,12 +1,9 @@
-"""
-web_search tool implementation.
-
-Uses DuckDuckGo Instant Answer API (free, no API key).
-For production consider: Brave Search API, Tavily, Serper, or SerpAPI.
-"""
+"""web_search tool implementation powered by SerpAPI."""
 
 import logging
 import httpx
+
+from ..config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +11,7 @@ _HTTP = httpx.AsyncClient(
     timeout=15.0,
     headers={"User-Agent": "Olivia-VoiceAssistant/1.0 (web_search tool)"},
 )
-_DDG_URL = "https://api.duckduckgo.com/"
+_SERPAPI_URL = "https://serpapi.com/search.json"
 
 
 async def web_search(query: str) -> dict:
@@ -24,32 +21,52 @@ async def web_search(query: str) -> dict:
     Returns a dict with keys:
         query, results (list of {title, snippet, url}), description
     """
+    api_key = settings.SERPAPI_KEY.strip()
+    if not api_key:
+        return {
+            "query": query,
+            "results": [],
+            "error": "SERPAPI_KEY is missing",
+            "description": "未配置 SERPAPI_KEY，无法进行联网搜索。",
+        }
+
     params = {
         "q": query,
-        "format": "json",
-        "no_html": "1",
-        "skip_disambig": "1",
+        "api_key": api_key,
+        "engine": settings.SERPAPI_ENGINE,
+        "hl": "zh-cn",
+        "gl": "cn",
     }
+
     try:
-        resp = await _HTTP.get(_DDG_URL, params=params)
+        resp = await _HTTP.get(_SERPAPI_URL, params=params)
         resp.raise_for_status()
         data = resp.json()
 
         results: list[dict] = []
 
-        # Instant Answer (best result)
-        abstract = data.get("AbstractText", "").strip()
-        abstract_url = data.get("AbstractURL", "")
-        if abstract:
-            results.append({"title": data.get("Heading", query), "snippet": abstract, "url": abstract_url})
+        # Prefer answer_box when SerpAPI extracts a direct answer.
+        answer_box = data.get("answer_box") or {}
+        answer = (
+            answer_box.get("answer")
+            or answer_box.get("snippet")
+            or answer_box.get("result")
+            or ""
+        )
+        if answer:
+            results.append({
+                "title": answer_box.get("title") or query,
+                "snippet": str(answer),
+                "url": answer_box.get("link") or "",
+            })
 
-        # Related topics
-        for topic in data.get("RelatedTopics", [])[:3]:
-            if isinstance(topic, dict) and topic.get("Text"):
+        for item in (data.get("organic_results") or [])[:5]:
+            title = item.get("title")
+            if title:
                 results.append({
-                    "title": topic.get("Text", "")[:60],
-                    "snippet": topic.get("Text", ""),
-                    "url": topic.get("FirstURL", ""),
+                    "title": title,
+                    "snippet": item.get("snippet") or "",
+                    "url": item.get("link") or "",
                 })
 
         if results:

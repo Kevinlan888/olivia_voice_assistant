@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     )
     MAX_HISTORY_TURNS: int = 10
 
+    # ── Search ───────────────────────────────────────────────────────────────
+    SERPAPI_KEY: str = ""
+    SERPAPI_ENGINE: str = "google"
+
     # ── Audio ─────────────────────────────────────────────────────────────────
     # Client sends raw PCM: 16-bit signed little-endian, 16 kHz, mono
     AUDIO_SAMPLE_RATE: int = 16000
