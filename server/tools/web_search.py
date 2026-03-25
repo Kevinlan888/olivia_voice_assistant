@@ -54,9 +54,9 @@ async def web_search(query: str) -> dict:
 
         if results:
             top = results[0]["snippet"][:200]
-            description = f"搜索"{query}"的结果：{top}"
+            description = f'搜索"{query}"的结果：{top}'
         else:
-            description = f"未找到关于"{query}"的相关信息，建议直接访问搜索引擎查询。"
+            description = f'未找到关于"{query}"的相关信息，建议直接访问搜索引擎查询。'
 
         result = {"query": query, "results": results[:4], "description": description}
         logger.info("[tool:web_search] query=%r found=%d", query, len(results))
@@ -68,5 +68,5 @@ async def web_search(query: str) -> dict:
             "query": query,
             "results": [],
             "error": str(exc),
-            "description": f"搜索"{query}"时出现错误，请稍后重试。",
+            "description": f'搜索"{query}"时出现错误，请稍后重试。',
         }
