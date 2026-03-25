@@ -439,6 +439,8 @@ function connect() {
     const msg = evt.data;
 
     if (msg === 'DONE') {
+      inStatusAudio = false;
+      statusAudioBuf = [];
       _idle();
       setProcessStatus('');
       if (streamPlayer && !streamPlayer.failed) {
@@ -471,6 +473,8 @@ function connect() {
       }
 
     } else if (msg.startsWith('ASSISTANT_TEXT:')) {
+      inStatusAudio = false;
+      statusAudioBuf = [];
       const txt = msg.slice(15).trim();
       if (txt) addBubble('assistant', txt);
 
@@ -486,6 +490,8 @@ function connect() {
       if (clips.length) await playChunks(clips);
 
     } else if (msg.startsWith('ERROR:')) {
+      inStatusAudio = false;
+      statusAudioBuf = [];
       _idle('出错了，请重试');
       setProcessStatus('处理失败');
       addBubble('info', '⚠️ ' + msg.slice(6));

@@ -134,10 +134,17 @@ async def audio_endpoint(websocket: WebSocket):
             # Optional: synthesize and push a short status audio clip so the
             # user hears voice feedback right away (requires TTS_STATUS_AUDIO=true).
             if settings.TTS_STATUS_AUDIO:
-                async for chunk in tts.synthesize_stream(msg):
-                    if chunk:
-                        await websocket.send_bytes(chunk)
-                await websocket.send_text("STATUS_AUDIO_DONE")
+                try:
+                    async for chunk in tts.synthesize_stream(msg):
+                        if chunk:
+                            await websocket.send_bytes(chunk)
+                except Exception as exc:
+                    logger.warning("Status audio synthesis failed: %s", exc)
+                finally:
+                    try:
+                        await websocket.send_text("STATUS_AUDIO_DONE")
+                    except Exception:
+                        pass
         except Exception:
             pass  # Never let status delivery crash the main pipeline
 
