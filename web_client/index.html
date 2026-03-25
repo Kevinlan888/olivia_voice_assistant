@@ -263,7 +263,8 @@
 
 <script>
 // ── Config ────────────────────────────────────────────────────────────────────
-const WS_URL          = `ws://${location.host}/ws/audio`;
+const WS_SCHEME       = location.protocol === 'https:' ? 'wss' : 'ws';
+const WS_URL          = `${WS_SCHEME}://${location.host}/ws/audio`;
 const TARGET_SR       = 16000;
 const SEND_CHUNK      = 8192;       // bytes per WebSocket binary frame
 
