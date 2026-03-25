@@ -9,6 +9,8 @@ WebSocket 协议 (文本帧 / 二进制帧):
     text    : "PING"       — 保活心跳
 
   Server → Client:
+        text    : "USER_TEXT:<msg>"    — ASR 识别出的用户文本
+        text    : "ASSISTANT_TEXT:<msg>" — 助手最终文本回复
     text    : "STATUS:<msg>"       — 工具调用状态提示（立即推送）
     text    : "STATUS_AUDIO_DONE"  — 状态提示音发送完毕（可选）
     binary  : MP3 audio chunk      — TTS 结果（分批流式）
@@ -157,12 +159,15 @@ async def audio_endpoint(websocket: WebSocket):
                         await websocket.send_text("EMPTY")
                         continue
 
+                    await websocket.send_text(f"USER_TEXT:{text}")
+
                     # 2. Agent: LLM intent detection + optional tool calls (non-blocking)
                     session.add("user", text)
                     agent = ToolAgent(llm_client=llm, status_cb=send_status)
                     reply = await agent.run(session.messages())
                     session.add("assistant", reply)
                     logger.info("[LLM/Agent] %s", reply)
+                    await websocket.send_text(f"ASSISTANT_TEXT:{reply}")
 
                     # 3. TTS + 4. Return audio (streaming)
                     total_bytes = 0

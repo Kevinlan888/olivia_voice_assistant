@@ -153,6 +153,22 @@
       min-height: 1.2em;
     }
 
+    .process-status {
+      min-height: 1.4em;
+      margin-top: 0.65rem;
+      padding: 0 0.75rem;
+      color: #a89af7;
+      font-size: 0.8rem;
+      text-align: center;
+      opacity: 0;
+      transform: translateY(-2px);
+      transition: opacity 0.18s ease, transform 0.18s ease;
+    }
+    .process-status.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
     /* ── Chat log ────────────────────────────────────────────────────────── */
     .chat {
       width: 100%;
@@ -240,6 +256,7 @@
   </div>
 
   <p class="hint" id="hint">按住麦克风说话，松开发送</p>
+  <div class="process-status" id="processStatus"></div>
 
   <div class="chat" id="chat"></div>
 </div>
@@ -264,6 +281,7 @@ let currentPlayback = null;         // { ctx, src, resolveEnded }
 let isPlayingAudio = false;
 let streamPlayer = null;            // progressive playback state for final reply
 let holdSource = null;              // 'pointer' | 'space' | null
+let pendingUserBubble = null;
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
 const micBtn    = document.getElementById('micBtn');
@@ -271,6 +289,7 @@ const ring      = document.getElementById('ring');
 const dot       = document.getElementById('dot');
 const statusTxt = document.getElementById('statusTxt');
 const hint      = document.getElementById('hint');
+const processStatus = document.getElementById('processStatus');
 const chat      = document.getElementById('chat');
 const waveCanv  = document.getElementById('waveCanvas');
 const waveCtx   = waveCanv.getContext('2d');
@@ -288,6 +307,11 @@ function addBubble(cls, text) {
   chat.appendChild(el);
   el.scrollIntoView({ behavior: 'smooth', block: 'end' });
   return el;
+}
+
+function setProcessStatus(text = '') {
+  processStatus.textContent = text;
+  processStatus.classList.toggle('show', Boolean(text));
 }
 
 function createStreamPlayer() {
@@ -389,11 +413,13 @@ function connect() {
     setStatus('ok', '已连接');
     micBtn.disabled = false;
     hint.textContent = '按住麦克风说话，松开发送';
+    setProcessStatus('');
   };
 
   ws.onclose = () => {
     setStatus('', '已断开，正在重连...');
     micBtn.disabled = true;
+    setProcessStatus('连接已断开，正在重连...');
     _cleanupRecording(false);
     stopPlayback();
     setTimeout(connect, 2500);
@@ -414,26 +440,43 @@ function connect() {
 
     if (msg === 'DONE') {
       _idle();
+      setProcessStatus('');
       if (streamPlayer && !streamPlayer.failed) {
         streamPlayer.finish();
       } else {
-        addBubble('assistant', '播放回复中...');
         const mp3 = audioChunks.splice(0);
         if (mp3.length) await playChunks(mp3);
       }
 
     } else if (msg === 'EMPTY') {
       _idle('未检测到语音，请重试');
+      setProcessStatus('');
       audioChunks = [];
+      if (pendingUserBubble) {
+        pendingUserBubble.remove();
+        pendingUserBubble = null;
+      }
       if (streamPlayer) {
         streamPlayer.stop();
         streamPlayer = null;
       }
 
+    } else if (msg.startsWith('USER_TEXT:')) {
+      const txt = msg.slice(10).trim();
+      if (pendingUserBubble) {
+        pendingUserBubble.textContent = txt || '未识别到语音';
+        pendingUserBubble = null;
+      } else if (txt) {
+        addBubble('user', txt);
+      }
+
+    } else if (msg.startsWith('ASSISTANT_TEXT:')) {
+      const txt = msg.slice(15).trim();
+      if (txt) addBubble('assistant', txt);
+
     } else if (msg.startsWith('STATUS:')) {
       const txt = msg.slice(7);
-      addBubble('info', '⏳ ' + txt);
-      hint.textContent = txt;
+      setProcessStatus(txt);
       inStatusAudio = true;
       statusAudioBuf = [];
 
@@ -444,8 +487,13 @@ function connect() {
 
     } else if (msg.startsWith('ERROR:')) {
       _idle('出错了，请重试');
+      setProcessStatus('处理失败');
       addBubble('info', '⚠️ ' + msg.slice(6));
       audioChunks = [];
+      if (pendingUserBubble) {
+        pendingUserBubble.remove();
+        pendingUserBubble = null;
+      }
       if (streamPlayer) {
         streamPlayer.stop();
         streamPlayer = null;
@@ -573,12 +621,13 @@ async function startRecording() {
 
   recording = true;
   audioChunks = [];
+  setProcessStatus('');
   micBtn.className = 'rec';
   ring.className   = 'ring show';
   waveCanv.className = 'show';
   setStatus('rec', '录音中...');
   hint.textContent = '松开发送';
-  addBubble('user', '🎙 录音中...');
+  pendingUserBubble = addBubble('user', '正在听你说...');
   drawWave();
 }
 
@@ -605,6 +654,7 @@ function _cleanupRecording(sendEnd) {
     micBtn.className = 'think';
     setStatus('think', 'AI 思考中...');
     hint.textContent = '正在处理...';
+    setProcessStatus('正在处理...');
   }
 }
 
