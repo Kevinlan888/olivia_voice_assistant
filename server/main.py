@@ -25,6 +25,7 @@ import io
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -91,7 +92,25 @@ class Session:
             self.history = self.history[-max_msgs:]
 
     def messages(self) -> list[dict]:
-        return [{"role": "system", "content": settings.SYSTEM_PROMPT}] + self.history
+        return [{"role": "system", "content": _build_system_prompt()}] + self.history
+
+
+def _build_system_prompt() -> str:
+    now = datetime.now().astimezone()
+    timezone_name = now.tzname() or "local"
+    current_time_text = now.strftime("%Y-%m-%d %H:%M:%S")
+    weekday_map = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    weekday_text = weekday_map[now.weekday()]
+
+    return (
+        f"{settings.SYSTEM_PROMPT}\n\n"
+        "以下是系统提供的实时上下文，请当作事实使用：\n"
+        f"- 当前本地时间：{current_time_text}\n"
+        f"- 星期：{weekday_text}\n"
+        f"- 时区：{timezone_name}\n"
+        "当用户提到今天、明天、后天、现在、今晚、本周等相对时间时，"
+        "请以上述当前时间为准进行理解和回答。"
+    )
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────────
