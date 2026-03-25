@@ -212,7 +212,7 @@
   </button>
 </div>
 
-<p class="hint" id="hint">点击麦克风开始说话</p>
+<p class="hint" id="hint">按住麦克风说话，松开发送</p>
 
 <div class="chat" id="chat"></div>
 
@@ -235,6 +235,7 @@ let inStatusAudio  = false;
 let currentPlayback = null;         // { ctx, src, resolveEnded }
 let isPlayingAudio = false;
 let streamPlayer = null;            // progressive playback state for final reply
+let holdSource = null;              // 'pointer' | 'space' | null
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
 const micBtn    = document.getElementById('micBtn');
@@ -359,7 +360,7 @@ function connect() {
   ws.onopen = () => {
     setStatus('ok', '已连接');
     micBtn.disabled = false;
-    hint.textContent = '点击麦克风开始说话';
+    hint.textContent = '按住麦克风说话，松开发送';
   };
 
   ws.onclose = () => {
@@ -548,7 +549,7 @@ async function startRecording() {
   ring.className   = 'ring show';
   waveCanv.className = 'show';
   setStatus('rec', '录音中...');
-  hint.textContent = '再次点击停止录音';
+  hint.textContent = '松开发送';
   addBubble('user', '🎙 录音中...');
   drawWave();
 }
@@ -579,22 +580,79 @@ function _cleanupRecording(sendEnd) {
   }
 }
 
-function _idle(hintMsg = '点击麦克风开始说话') {
+function _idle(hintMsg = '按住麦克风说话，松开发送') {
   micBtn.className = '';
   ring.className   = 'ring';
   setStatus('ok', '已连接');
   hint.textContent = hintMsg;
 }
 
-micBtn.addEventListener('click', () => {
+async function beginPressToTalk(source) {
+  if (holdSource || recording) return;
+  holdSource = source;
+
   if (isPlayingAudio) {
-    const stopped = stopPlayback();
-    if (stopped) addBubble('info', '已停止播放');
+    stopPlayback();
   }
 
+  if (ws?.readyState !== WebSocket.OPEN) {
+    holdSource = null;
+    hint.textContent = '连接未就绪，请稍后';
+    return;
+  }
+
+  await startRecording();
+
+  // Permission denied / getUserMedia failed -> reset hold state
+  if (!recording) holdSource = null;
+}
+
+function endPressToTalk(source) {
+  if (holdSource !== source) return;
+  holdSource = null;
   if (recording) stopRecording();
-  else           startRecording();
+}
+
+micBtn.addEventListener('pointerdown', async (evt) => {
+  evt.preventDefault();
+  try { micBtn.setPointerCapture(evt.pointerId); } catch {}
+  await beginPressToTalk('pointer');
 });
+
+micBtn.addEventListener('pointerup', (evt) => {
+  evt.preventDefault();
+  try { micBtn.releasePointerCapture(evt.pointerId); } catch {}
+  endPressToTalk('pointer');
+});
+
+micBtn.addEventListener('pointercancel', () => {
+  endPressToTalk('pointer');
+});
+
+window.addEventListener('keydown', async (evt) => {
+  if (evt.code !== 'Space') return;
+  if (evt.repeat) {
+    evt.preventDefault();
+    return;
+  }
+
+  const tag = evt.target?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || evt.target?.isContentEditable) return;
+
+  evt.preventDefault();
+  await beginPressToTalk('space');
+});
+
+window.addEventListener('keyup', (evt) => {
+  if (evt.code !== 'Space') return;
+  evt.preventDefault();
+  endPressToTalk('space');
+});
+
+window.addEventListener('blur', () => {
+  if (holdSource) endPressToTalk(holdSource);
+});
+
 
 // ── Waveform visualiser ───────────────────────────────────────────────────────
 let _rafId = 0;
