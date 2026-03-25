@@ -1,5 +1,7 @@
 import io
+import os
 import struct
+import time
 import wave
 import logging
 import numpy as np
@@ -8,6 +10,9 @@ from faster_whisper import WhisperModel
 from ..config import settings
 
 logger = logging.getLogger(__name__)
+
+# Force huggingface_hub to always show tqdm progress bars even in subprocesses
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")
 
 
 class WhisperASR:
@@ -24,12 +29,26 @@ class WhisperASR:
             settings.WHISPER_DEVICE,
             settings.WHISPER_COMPUTE_TYPE,
         )
+        # Check cache so we can tell the user whether a download is needed
+        cache_dir = os.path.expanduser(
+            f"~/.cache/huggingface/hub/models--Systran--faster-whisper-{settings.WHISPER_MODEL}"
+        )
+        if not os.path.isdir(cache_dir):
+            logger.info(
+                "Model not in local cache — downloading from HuggingFace Hub "
+                "(this may take a minute for the first run) …"
+            )
+        else:
+            logger.info("Model found in cache: %s", cache_dir)
+
+        t0 = time.perf_counter()
         self._model = WhisperModel(
             settings.WHISPER_MODEL,
             device=settings.WHISPER_DEVICE,
             compute_type=settings.WHISPER_COMPUTE_TYPE,
         )
-        logger.info("Whisper model loaded.")
+        elapsed = time.perf_counter() - t0
+        logger.info("Whisper model loaded in %.1f s.", elapsed)
 
     # ------------------------------------------------------------------
     def transcribe(self, raw_pcm: bytes) -> str:
