@@ -46,6 +46,8 @@ class WhisperASR:
             settings.WHISPER_MODEL,
             device=settings.WHISPER_DEVICE,
             compute_type=settings.WHISPER_COMPUTE_TYPE,
+            cpu_threads=4,   # cap OpenMP threads; default (all cores) slows init
+            num_workers=1,
         )
         elapsed = time.perf_counter() - t0
         logger.info("Whisper model loaded in %.1f s.", elapsed)
