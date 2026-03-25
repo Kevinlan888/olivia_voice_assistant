@@ -1,145 +1,244 @@
 # Olivia — AI Voice Assistant
 
-基于 **"瘦客户端 + 服务端"** 架构的本地 AI 语音助手。
+一个本地可部署的中文语音助手，采用“轻客户端 + 中心服务端”架构，支持：
 
-```
-客户端（树莓派/PC）
-  └─ 离线唤醒 (Porcupine)
-  └─ 麦克风录音 (PyAudio + VAD)
-  └─ WebSocket 音频流
-              │
-              ▼
-服务端（中心服务器）
-  ASR  : Faster-Whisper
-  LLM  : OpenAI API / Ollama
-  TTS  : Edge-TTS / GPT-SoVITS
-              │
-              ▼
-客户端：播放 TTS 音频 (pygame)
-```
+- ASR：Faster-Whisper
+- LLM：OpenAI 兼容 API / Ollama
+- TTS：Edge-TTS / GPT-SoVITS
+- 工具调用：Function Calling（天气、联网搜索、智能家居）
+- 前端：手机网页（单文件 `web_client/index.html`）
 
----
+## 架构概览
+
+```text
+麦克风输入（网页或本地客户端）
+  -> WebSocket 音频流（PCM）
+  -> 服务端 ASR（Whisper）
+  -> LLM + ToolAgent（可并发调用工具）
+  -> TTS（流式音频）
+  -> 网页端边收边播
+```
 
 ## 项目结构
 
+```text
+olivia_voice_assistant/
+├─ client/
+│  ├─ main.py
+│  ├─ ws_client.py
+│  ├─ audio_recorder.py
+│  ├─ audio_player.py
+│  ├─ wake_word.py
+│  ├─ config.py
+│  └─ requirements.txt
+├─ web_client/
+│  └─ index.html
+├─ server/
+│  ├─ main.py
+│  ├─ config.py
+│  ├─ agent.py
+│  ├─ requirements.txt
+│  ├─ asr/
+│  │  └─ whisper_asr.py
+│  ├─ llm/
+│  │  ├─ base.py
+│  │  ├─ openai_llm.py
+│  │  └─ ollama_llm.py
+│  ├─ tts/
+│  │  ├─ base.py
+│  │  ├─ edge_tts_engine.py
+│  │  └─ sovits_tts.py
+│  └─ tools/
+│     ├─ __init__.py
+│     ├─ definitions.py
+│     ├─ weather.py
+│     ├─ smart_home.py
+│     └─ web_search.py
+├─ .env
+└─ README.md
 ```
-olivia/
-├── client/
-│   ├── config.py           # 客户端配置（pydantic-settings）
-│   ├── wake_word.py        # 离线唤醒词检测（Porcupine）
-│   ├── audio_recorder.py   # 麦克风录音 + 能量 VAD
-│   ├── audio_player.py     # MP3/WAV 播放（pygame）
-│   ├── ws_client.py        # WebSocket 客户端
-│   ├── main.py             # 客户端主入口
-│   └── requirements.txt
-├── web_client/
-│   └── index.html          # 手机网页客户端（单文件，无需安装）
-├── server/
-│   ├── config.py           # 服务端配置（pydantic-settings）
-│   ├── main.py             # FastAPI 应用 + WebSocket 端点
-│   ├── agent.py            # ToolAgent（Function Calling 循环）
-│   ├── asr/
-│   │   └── whisper_asr.py  # Faster-Whisper ASR
-│   ├── llm/
-│   │   ├── base.py
-│   │   ├── openai_llm.py   # OpenAI / 兼容 API
-│   │   └── ollama_llm.py   # Ollama 本地模型
-│   ├── tools/
-│   │   ├── definitions.py  # Function Calling schema
-│   │   ├── weather.py      # 查天气（wttr.in）
-│   │   ├── smart_home.py   # 控制智能家居
-│   │   └── web_search.py   # 联网搜索（DuckDuckGo）
-│   └── tts/
-│       ├── base.py
-│       ├── edge_tts_engine.py  # Microsoft Edge TTS（免费）
-│       └── sovits_tts.py       # GPT-SoVITS（本地克隆音色）
-├── .vscode/
-│   └── launch.json         # VS Code 调试配置
-├── .env.example
-└── README.md
-```
-
----
 
 ## 快速开始
 
-### 1. 克隆项目 & 配置环境变量
+### 1. 配置环境变量
 
 ```bash
+# Linux / macOS
 cp .env.example .env
-# 编辑 .env，填写 PORCUPINE_ACCESS_KEY 等
+
+# Windows PowerShell
+Copy-Item .env.example .env
 ```
+
+编辑 `.env`，至少确认以下字段：
+
+- `LLM_PROVIDER`
+- `OPENAI_API_KEY`（如走 openai 兼容接口）
+- `TTS_PROVIDER`
+- `SERPAPI_KEY`（如要联网搜索）
 
 ### 2. 启动服务端
 
 ```bash
-cd olivia
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv
+
+# Linux / macOS
+source .venv/bin/activate
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
 
 pip install -r server/requirements.txt
-
-# 若使用 GPU 加速 Whisper：
-# pip install faster-whisper[cuda]  （需要 CUDA 环境）
-
-# 启动，reload 模式方便开发
 uvicorn server.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 3. 启动客户端
+### 3. 使用网页端
 
-```bash
-# 树莓派先安装系统依赖：
-# sudo apt install portaudio19-dev libmpg123-dev
+服务启动后访问：
 
-pip install -r client/requirements.txt
-python -m client.main
-```
-
-### 4. 手机网页客户端
-
-服务端启动后，手机浏览器直接访问（无需安装任何 App）：
-
-```
+```text
 http://<服务器IP>:8000/
 ```
 
-点击麦克风图标 → 说话 → 再次点击停止 → 播放 AI 回复。
+网页交互：
 
-- 无需唤醒词，点击即用
-- 支持 iOS Safari / Android Chrome
-- 单文件纯 HTML，无框架依赖
+- 按住麦克风说话，松开发送
+- 支持空格键按下说话，松开发送
+- 聊天区固定高度，内部滚动
+- 支持显示用户转写文本与助手文本回复
 
----
+注意：
 
-## WebSocket 通信协议
+- `localhost` 可用 HTTP 调麦克风
+- 手机通过局域网 IP 访问时，通常需要 HTTPS 才能使用麦克风权限
 
-| 方向 | 帧类型 | 内容 |
-|------|--------|------|
-| Client → Server | binary | PCM 音频块（int16, 16kHz, mono） |
-| Client → Server | text | `"END"` — 录音结束，触发处理管道 |
-| Client → Server | text | `"PING"` — 保活心跳 |
-| Server → Client | binary | MP3 音频块（TTS 结果，流式分批） |
-| Server → Client | text | `"DONE"` — 本轮音频发送完毕 |
-| Server → Client | text | `"EMPTY"` — 未识别到有效语音 |
-| Server → Client | text | `"ERROR:<msg>"` — 处理异常 |
-| Server → Client | text | `"PONG"` — 心跳回应 |
+## WebSocket 协议
 
----
+### Client -> Server
 
-## 关键技术选型说明
+- `binary`：PCM 音频块（int16, 16kHz, mono）
+- `text`：`END`（录音结束）
+- `text`：`PING`（保活）
 
-| 模块 | 选型 | 理由 |
-|------|------|------|
-| 唤醒词 | Porcupine | 全离线、低延迟、支持树莓派 |
-| ASR | Faster-Whisper | CTranslate2 量化，比原版快 4× |
-| LLM | Ollama / OpenAI | 切换灵活；Ollama 支持完全本地部署 |
-| TTS | Edge-TTS | 免费、音质好、无需本地 GPU |
-| TTS（高质量） | GPT-SoVITS | 支持音色克隆 |
-| 传输协议 | WebSocket | 全双工、低延迟、支持流式二进制传输 |
-| 服务端框架 | FastAPI + asyncio | 原生异步、高并发 |
+### Server -> Client
 
----
+- `text`：`USER_TEXT:<msg>`（ASR 用户转写文本）
+- `text`：`ASSISTANT_TEXT:<msg>`（助手文本回复）
+- `text`：`STATUS:<msg>`（过程状态）
+- `text`：`STATUS_AUDIO_DONE`（状态语音结束）
+- `binary`：TTS 音频分片（流式）
+- `text`：`DONE`（本轮音频完成）
+- `text`：`EMPTY`（无有效语音）
+- `text`：`ERROR:<msg>`（异常）
+- `text`：`PONG`（保活响应）
 
-## 环境变量参考
+## 如何新增一个 Function Calling 工具
 
-见 [`.env.example`](.env.example)。
+下面以新增 `get_stock_price` 为例。
+
+### 1. 新建工具实现
+
+新建 `server/tools/stock.py`：
+
+```python
+import httpx
+
+
+async def get_stock_price(symbol: str) -> dict:
+  # 示例：请替换为你的真实数据源
+  url = f"https://example.com/stock?symbol={symbol}"
+  async with httpx.AsyncClient(timeout=10.0) as client:
+    resp = await client.get(url)
+    resp.raise_for_status()
+    data = resp.json()
+
+  return {
+    "symbol": symbol,
+    "price": data.get("price"),
+    "currency": data.get("currency", "CNY"),
+    "description": f"{symbol} 当前价格约为 {data.get('price')} {data.get('currency', 'CNY')}。",
+  }
+```
+
+规则：
+
+- 工具函数用 `async def`
+- 参数尽量简单（字符串、数字、布尔）
+- 返回 `dict`，并包含可直接给 LLM 使用的 `description`
+
+### 2. 导出工具
+
+在 `server/tools/__init__.py` 中导入并加入 `__all__`。
+
+### 3. 注册到 Agent 调度表
+
+编辑 `server/agent.py`：
+
+- 在 import 区域引入 `get_stock_price`
+- 在 `_TOOL_REGISTRY` 增加映射：
+
+```python
+"get_stock_price": get_stock_price,
+```
+
+### 4. 增加 Tool Schema
+
+编辑 `server/tools/definitions.py`，在 `TOOL_DEFINITIONS` 追加：
+
+```python
+{
+  "type": "function",
+  "function": {
+    "name": "get_stock_price",
+    "description": "查询股票最新价格。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "type": "string",
+          "description": "股票代码，例如 AAPL 或 600519"
+        }
+      },
+      "required": ["symbol"],
+    },
+  },
+}
+```
+
+并在 `TOOL_STATUS_MESSAGES` 增加：
+
+```python
+"get_stock_price": "正在查询股价...",
+```
+
+### 5. 提示词建议（可选但推荐）
+
+在 `SYSTEM_PROMPT` 中明确：
+
+- 涉及实时信息（价格、新闻、天气）优先调用工具
+- 工具失败时给出降级说明，不要编造
+
+### 6. 验证
+
+1. 重启服务端
+2. 问一句“帮我查一下 AAPL 现在多少钱”
+3. 查看日志是否出现 `[Agent] calling tool get_stock_price(...)`
+
+## 常见问题
+
+### 1. `cublas64_12.dll is not found`
+
+Windows + CUDA 常见问题。可安装：
+
+- `nvidia-cublas-cu12`
+- `nvidia-cudnn-cu12`
+
+本项目已在 `server/asr/whisper_asr.py` 增加 Windows DLL 路径兜底逻辑。
+
+### 2. 手机网页无法访问麦克风
+
+局域网 IP + HTTP 通常不属于安全上下文，需要 HTTPS。
+
+## 环境变量
+
+请参考 `.env.example` 和当前 `.env` 注释说明。
