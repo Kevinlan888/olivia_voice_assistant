@@ -234,6 +234,7 @@ let statusAudioBuf = [];            // status-hint MP3 fragments
 let inStatusAudio  = false;
 let currentPlayback = null;         // { ctx, src, resolveEnded }
 let isPlayingAudio = false;
+let streamPlayer = null;            // progressive playback state for final reply
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
 const micBtn    = document.getElementById('micBtn');
@@ -260,6 +261,96 @@ function addBubble(cls, text) {
   return el;
 }
 
+function createStreamPlayer() {
+  if (!window.MediaSource || !MediaSource.isTypeSupported('audio/mpeg')) {
+    return null;
+  }
+
+  const audio = new Audio();
+  audio.autoplay = true;
+  audio.playsInline = true;
+
+  const mediaSource = new MediaSource();
+  const objectUrl = URL.createObjectURL(mediaSource);
+  audio.src = objectUrl;
+
+  const state = {
+    audio,
+    mediaSource,
+    sourceBuffer: null,
+    queue: [],
+    open: false,
+    done: false,
+    failed: false,
+    objectUrl,
+  };
+
+  const flush = () => {
+    if (!state.open || !state.sourceBuffer || state.sourceBuffer.updating) return;
+
+    if (state.queue.length > 0) {
+      const chunk = state.queue.shift();
+      try {
+        state.sourceBuffer.appendBuffer(chunk);
+      } catch {
+        state.queue.unshift(chunk);
+      }
+      return;
+    }
+
+    if (state.done && state.mediaSource.readyState === 'open') {
+      try { state.mediaSource.endOfStream(); } catch {}
+    }
+  };
+
+  mediaSource.addEventListener('sourceopen', () => {
+    state.open = true;
+    try {
+      state.sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
+      state.sourceBuffer.mode = 'sequence';
+      state.sourceBuffer.addEventListener('updateend', flush);
+      flush();
+    } catch {
+      state.failed = true;
+    }
+  });
+
+  state.push = (arrayBuffer) => {
+    if (state.failed) return;
+    isPlayingAudio = true;
+    state.queue.push(arrayBuffer);
+    flush();
+  };
+
+  state.finish = () => {
+    state.done = true;
+    flush();
+  };
+
+  state.stop = () => {
+    state.done = true;
+    state.queue = [];
+    try { audio.pause(); } catch {}
+    try { audio.removeAttribute('src'); audio.load(); } catch {}
+    try { URL.revokeObjectURL(objectUrl); } catch {}
+    isPlayingAudio = false;
+  };
+
+  audio.addEventListener('playing', () => { isPlayingAudio = true; });
+  audio.addEventListener('ended', () => {
+    isPlayingAudio = false;
+    if (streamPlayer === state) {
+      state.stop();
+      streamPlayer = null;
+    }
+  });
+  audio.addEventListener('pause', () => {
+    if (state.done) isPlayingAudio = false;
+  });
+
+  return state;
+}
+
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connect() {
   ws = new WebSocket(WS_URL);
@@ -275,6 +366,7 @@ function connect() {
     setStatus('', '已断开，正在重连...');
     micBtn.disabled = true;
     _cleanupRecording(false);
+    stopPlayback();
     setTimeout(connect, 2500);
   };
 
@@ -284,6 +376,7 @@ function connect() {
     // Binary frame = audio data
     if (evt.data instanceof ArrayBuffer) {
       if (inStatusAudio) statusAudioBuf.push(evt.data);
+      else if (streamPlayer && !streamPlayer.failed) streamPlayer.push(evt.data);
       else               audioChunks.push(evt.data);
       return;
     }
@@ -292,13 +385,21 @@ function connect() {
 
     if (msg === 'DONE') {
       _idle();
-      addBubble('assistant', '🔈 播放回复中...');
-      const mp3 = audioChunks.splice(0);
-      if (mp3.length) await playChunks(mp3);
+      if (streamPlayer && !streamPlayer.failed) {
+        streamPlayer.finish();
+      } else {
+        addBubble('assistant', '播放回复中...');
+        const mp3 = audioChunks.splice(0);
+        if (mp3.length) await playChunks(mp3);
+      }
 
     } else if (msg === 'EMPTY') {
       _idle('未检测到语音，请重试');
       audioChunks = [];
+      if (streamPlayer) {
+        streamPlayer.stop();
+        streamPlayer = null;
+      }
 
     } else if (msg.startsWith('STATUS:')) {
       const txt = msg.slice(7);
@@ -316,6 +417,10 @@ function connect() {
       _idle('出错了，请重试');
       addBubble('info', '⚠️ ' + msg.slice(6));
       audioChunks = [];
+      if (streamPlayer) {
+        streamPlayer.stop();
+        streamPlayer = null;
+      }
     }
     // PONG : ignore
   };
@@ -355,6 +460,13 @@ async function playChunks(chunks) {
 }
 
 function stopPlayback() {
+  if (streamPlayer) {
+    streamPlayer.stop();
+    streamPlayer = null;
+    audioChunks = [];
+    return true;
+  }
+
   if (!currentPlayback) return false;
 
   const { src, resolveEnded } = currentPlayback;
@@ -371,6 +483,10 @@ function stopPlayback() {
 // ── Microphone ────────────────────────────────────────────────────────────────
 async function startRecording() {
   if (recording) return;
+  if (streamPlayer) {
+    streamPlayer.stop();
+    streamPlayer = null;
+  }
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -453,6 +569,9 @@ function _cleanupRecording(sendEnd) {
   ring.className = 'ring';
 
   if (sendEnd && ws?.readyState === WebSocket.OPEN) {
+    audioChunks = [];
+    if (streamPlayer) streamPlayer.stop();
+    streamPlayer = createStreamPlayer();
     ws.send('END');
     micBtn.className = 'think';
     setStatus('think', 'AI 思考中...');

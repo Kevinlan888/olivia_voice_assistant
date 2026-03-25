@@ -1,4 +1,6 @@
 import logging
+from collections.abc import AsyncIterator
+
 import httpx
 from .base import BaseTTS
 from ..config import settings
@@ -20,6 +22,10 @@ class SovitsTTS(BaseTTS):
         self._base_url = settings.SOVITS_BASE_URL.rstrip("/")
         self._http = httpx.AsyncClient(timeout=60.0)
         logger.info("GPT-SoVITS TTS ready: url=%s", self._base_url)
+
+    async def synthesize_stream(self, text: str) -> AsyncIterator[bytes]:
+        """Yield TTS audio chunks (single chunk fallback for current SoVITS API)."""
+        yield await self.synthesize(text)
 
     async def synthesize(self, text: str) -> bytes:
         """POST text to GPT-SoVITS and return raw WAV bytes."""

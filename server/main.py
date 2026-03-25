@@ -113,10 +113,9 @@ async def audio_endpoint(websocket: WebSocket):
             # Optional: synthesize and push a short status audio clip so the
             # user hears voice feedback right away (requires TTS_STATUS_AUDIO=true).
             if settings.TTS_STATUS_AUDIO:
-                status_audio = await tts.synthesize(msg)
-                chunk_size = 4096
-                for i in range(0, len(status_audio), chunk_size):
-                    await websocket.send_bytes(status_audio[i : i + chunk_size])
+                async for chunk in tts.synthesize_stream(msg):
+                    if chunk:
+                        await websocket.send_bytes(chunk)
                 await websocket.send_text("STATUS_AUDIO_DONE")
         except Exception:
             pass  # Never let status delivery crash the main pipeline
@@ -165,15 +164,14 @@ async def audio_endpoint(websocket: WebSocket):
                     session.add("assistant", reply)
                     logger.info("[LLM/Agent] %s", reply)
 
-                    # 3. TTS
-                    audio_mp3 = await tts.synthesize(reply)
-                    logger.info("[TTS] %d bytes", len(audio_mp3))
-
-                    # 4. Return audio
-                    # Send in chunks so the client can start playing early
-                    chunk_size = 4096
-                    for i in range(0, len(audio_mp3), chunk_size):
-                        await websocket.send_bytes(audio_mp3[i : i + chunk_size])
+                    # 3. TTS + 4. Return audio (streaming)
+                    total_bytes = 0
+                    async for chunk in tts.synthesize_stream(reply):
+                        if not chunk:
+                            continue
+                        total_bytes += len(chunk)
+                        await websocket.send_bytes(chunk)
+                    logger.info("[TTS] streamed %d bytes", total_bytes)
 
                     await websocket.send_text("DONE")
 
