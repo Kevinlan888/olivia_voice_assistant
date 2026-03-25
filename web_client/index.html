@@ -36,6 +36,9 @@
                env(safe-area-inset-bottom, 1rem);
       overflow: hidden;
       -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
     }
 
     .app-shell {
@@ -145,6 +148,7 @@
     #micBtn svg             { width: 38px; height: 38px; color: var(--text); }
     #micBtn.rec svg         { color: var(--red);  }
     #micBtn.think svg       { color: var(--accent); }
+    #micBtn, .mic-area      { touch-action: manipulation; }
 
     .hint {
       color: var(--text-muted);
@@ -284,6 +288,7 @@ let streamPlayer = null;            // progressive playback state for final repl
 let holdSource = null;              // 'pointer' | 'space' | null
 let pendingUserBubble = null;
 let micPermission = 'unknown';      // unknown | prompt | granted | denied
+let sharedAudioCtx = null;         // pre-unlocked AudioContext (iOS autoplay)
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
 const micBtn    = document.getElementById('micBtn');
@@ -347,7 +352,32 @@ async function ensureMicPermission() {
   }
 }
 
+// Detect iOS Safari — MediaSource streaming is unreliable there
+const _isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+               (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+// Pre-unlock Web Audio on first user gesture so playback works on iOS
+async function unlockAudio() {
+  if (!sharedAudioCtx || sharedAudioCtx.state === 'closed') {
+    sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (sharedAudioCtx.state === 'suspended') {
+    try { await sharedAudioCtx.resume(); } catch {}
+  }
+  // Play a 1-sample silent buffer — satisfies iOS autoplay policy
+  try {
+    const buf = sharedAudioCtx.createBuffer(1, 1, 22050);
+    const src = sharedAudioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(sharedAudioCtx.destination);
+    src.start(0);
+  } catch {}
+}
+
 function createStreamPlayer() {
+  // Skip MediaSource on iOS — use chunk-based playback via playChunks instead
+  if (_isIOS) return null;
+
   if (!window.MediaSource || !MediaSource.isTypeSupported('audio/mpeg')) {
     return null;
   }
@@ -444,10 +474,9 @@ function connect() {
 
   ws.onopen = () => {
     setStatus('ok', '已连接');
-    micBtn.disabled = true;
-    hint.textContent = '正在请求麦克风权限...';
+    micBtn.disabled = false;
+    hint.textContent = '按住麦克风说话，松开发送';
     setProcessStatus('');
-    ensureMicPermission();
   };
 
   ws.onclose = () => {
@@ -553,7 +582,16 @@ async function playChunks(chunks) {
 
   const blob = new Blob(chunks, { type: 'audio/mpeg' });
   const buf  = await blob.arrayBuffer();
-  const ctx  = new (window.AudioContext || window.webkitAudioContext)();
+
+  // Reuse the pre-unlocked shared context so iOS autoplay policy is satisfied
+  if (!sharedAudioCtx || sharedAudioCtx.state === 'closed') {
+    sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  const ctx = sharedAudioCtx;
+  if (ctx.state === 'suspended') {
+    try { await ctx.resume(); } catch {}
+  }
+
   try {
     const decoded = await ctx.decodeAudioData(buf);
     const src = ctx.createBufferSource();
@@ -572,7 +610,7 @@ async function playChunks(chunks) {
   } finally {
     if (currentPlayback?.ctx === ctx) currentPlayback = null;
     isPlayingAudio = false;
-    ctx.close().catch(() => {});
+    // Do NOT close sharedAudioCtx — keep it alive for subsequent playback
   }
 }
 
@@ -713,6 +751,11 @@ async function beginPressToTalk(source) {
   if (holdSource || recording) return;
   holdSource = source;
 
+  // Unlock Web Audio API on this user gesture (required on iOS).
+  // Fire-and-forget — do NOT await here so we never suspend between
+  // setting holdSource and starting recording (avoids race with pointerup).
+  unlockAudio();
+
   if (isPlayingAudio) {
     stopPlayback();
   }
@@ -734,7 +777,13 @@ async function beginPressToTalk(source) {
   await startRecording();
 
   // Permission denied / getUserMedia failed -> reset hold state
-  if (!recording) holdSource = null;
+  if (!recording) { holdSource = null; return; }
+
+  // User released the button while we were still awaiting setup —
+  // stop recording immediately so we don't get stuck in recording=true.
+  if (holdSource !== source) {
+    stopRecording();
+  }
 }
 
 function endPressToTalk(source) {
