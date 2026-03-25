@@ -283,6 +283,7 @@ let isPlayingAudio = false;
 let streamPlayer = null;            // progressive playback state for final reply
 let holdSource = null;              // 'pointer' | 'space' | null
 let pendingUserBubble = null;
+let micPermission = 'unknown';      // unknown | prompt | granted | denied
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
 const micBtn    = document.getElementById('micBtn');
@@ -313,6 +314,37 @@ function addBubble(cls, text) {
 function setProcessStatus(text = '') {
   processStatus.textContent = text;
   processStatus.classList.toggle('show', Boolean(text));
+}
+
+function _setMicPermissionState(state) {
+  micPermission = state;
+  if (state === 'granted') {
+    micBtn.disabled = false;
+    hint.textContent = '按住麦克风说话，松开发送';
+  } else if (state === 'denied') {
+    micBtn.disabled = true;
+    hint.textContent = '请在浏览器中允许麦克风权限';
+  }
+}
+
+async function ensureMicPermission() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    _setMicPermissionState('denied');
+    hint.textContent = '当前浏览器不支持麦克风';
+    return false;
+  }
+
+  if (micPermission === 'granted') return true;
+
+  try {
+    const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    tempStream.getTracks().forEach(t => t.stop());
+    _setMicPermissionState('granted');
+    return true;
+  } catch {
+    _setMicPermissionState('denied');
+    return false;
+  }
 }
 
 function createStreamPlayer() {
@@ -412,9 +444,10 @@ function connect() {
 
   ws.onopen = () => {
     setStatus('ok', '已连接');
-    micBtn.disabled = false;
-    hint.textContent = '按住麦克风说话，松开发送';
+    micBtn.disabled = true;
+    hint.textContent = '正在请求麦克风权限...';
     setProcessStatus('');
+    ensureMicPermission();
   };
 
   ws.onclose = () => {
@@ -567,6 +600,10 @@ function stopPlayback() {
 // ── Microphone ────────────────────────────────────────────────────────────────
 async function startRecording() {
   if (recording) return;
+
+  const granted = await ensureMicPermission();
+  if (!granted) return;
+
   if (streamPlayer) {
     streamPlayer.stop();
     streamPlayer = null;
@@ -684,6 +721,14 @@ async function beginPressToTalk(source) {
     holdSource = null;
     hint.textContent = '连接未就绪，请稍后';
     return;
+  }
+
+  if (micPermission !== 'granted') {
+    const granted = await ensureMicPermission();
+    if (!granted) {
+      holdSource = null;
+      return;
+    }
   }
 
   await startRecording();
