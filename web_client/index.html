@@ -232,6 +232,8 @@ let micStream      = null;
 let audioChunks    = [];            // final reply MP3 fragments
 let statusAudioBuf = [];            // status-hint MP3 fragments
 let inStatusAudio  = false;
+let currentPlayback = null;         // { ctx, src, resolveEnded }
+let isPlayingAudio = false;
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
 const micBtn    = document.getElementById('micBtn');
@@ -325,19 +327,45 @@ function connect() {
 
 // ── Audio playback ────────────────────────────────────────────────────────────
 async function playChunks(chunks) {
+  if (!chunks.length) return;
+
   const blob = new Blob(chunks, { type: 'audio/mpeg' });
   const buf  = await blob.arrayBuffer();
   const ctx  = new (window.AudioContext || window.webkitAudioContext)();
   try {
     const decoded = await ctx.decodeAudioData(buf);
     const src = ctx.createBufferSource();
+    let resolveEnded = null;
+    const ended = new Promise((resolve) => { resolveEnded = resolve; });
+
     src.buffer = decoded;
     src.connect(ctx.destination);
+    src.onended = () => { if (resolveEnded) resolveEnded(); };
+
+    currentPlayback = { ctx, src, resolveEnded };
+    isPlayingAudio = true;
     src.start(0);
-    await new Promise(r => { src.onended = r; });
+
+    await ended;
   } finally {
-    ctx.close();
+    if (currentPlayback?.ctx === ctx) currentPlayback = null;
+    isPlayingAudio = false;
+    ctx.close().catch(() => {});
   }
+}
+
+function stopPlayback() {
+  if (!currentPlayback) return false;
+
+  const { src, resolveEnded } = currentPlayback;
+  currentPlayback = null;
+  isPlayingAudio = false;
+
+  try { src.onended = null; } catch {}
+  try { src.stop(0); } catch {}
+  try { if (resolveEnded) resolveEnded(); } catch {}
+
+  return true;
 }
 
 // ── Microphone ────────────────────────────────────────────────────────────────
@@ -440,6 +468,11 @@ function _idle(hintMsg = '点击麦克风开始说话') {
 }
 
 micBtn.addEventListener('click', () => {
+  if (isPlayingAudio) {
+    const stopped = stopPlayback();
+    if (stopped) addBubble('info', '已停止播放');
+  }
+
   if (recording) stopRecording();
   else           startRecording();
 });
