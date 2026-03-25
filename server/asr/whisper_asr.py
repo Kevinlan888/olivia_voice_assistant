@@ -4,8 +4,10 @@ import struct
 import time
 import wave
 import logging
+import site
+from pathlib import Path
+
 import numpy as np
-from faster_whisper import WhisperModel
 
 from ..config import settings
 
@@ -13,6 +15,53 @@ logger = logging.getLogger(__name__)
 
 # Force huggingface_hub to always show tqdm progress bars even in subprocesses
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")
+
+
+def _configure_windows_cuda_dll_paths() -> None:
+    """Expose CUDA DLLs from pip-installed NVIDIA wheels on Windows."""
+    if os.name != "nt":
+        return
+
+    candidate_roots = []
+    try:
+        candidate_roots.extend(Path(path) for path in site.getsitepackages())
+    except Exception:
+        pass
+
+    user_site = site.getusersitepackages()
+    if user_site:
+        candidate_roots.append(Path(user_site))
+
+    seen: set[str] = set()
+    dll_dirs: list[Path] = []
+    for root in candidate_roots:
+        for relative in ("nvidia/cublas/bin", "nvidia/cudnn/bin"):
+            dll_dir = root / relative
+            dll_dir_str = str(dll_dir)
+            if dll_dir.is_dir() and dll_dir_str not in seen:
+                seen.add(dll_dir_str)
+                dll_dirs.append(dll_dir)
+
+    if not dll_dirs:
+        return
+
+    current_path = os.environ.get("PATH", "")
+    missing_dirs = [str(path) for path in dll_dirs if str(path) not in current_path]
+    if missing_dirs:
+        os.environ["PATH"] = os.pathsep.join(missing_dirs + [current_path]) if current_path else os.pathsep.join(missing_dirs)
+
+    add_dll_directory = getattr(os, "add_dll_directory", None)
+    if add_dll_directory is not None:
+        for dll_dir in dll_dirs:
+            try:
+                add_dll_directory(str(dll_dir))
+            except OSError:
+                logger.warning("Failed to add CUDA DLL directory: %s", dll_dir)
+
+
+_configure_windows_cuda_dll_paths()
+
+from faster_whisper import WhisperModel
 
 
 class WhisperASR:
