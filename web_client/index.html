@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0d0d1a">
+  <title>Olivia</title>
+  <style>
+    :root {
+      --bg:           #0d0d1a;
+      --surface:      #16162a;
+      --surface2:     #1e1e35;
+      --accent:       #7c6ff7;
+      --accent-dim:   rgba(124,111,247,0.18);
+      --accent-glow:  rgba(124,111,247,0.35);
+      --text:         #e4e4f0;
+      --text-muted:   #7070a0;
+      --green:        #4eeaaa;
+      --red:          #ff6b6b;
+      --radius:       14px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                   "Hiragino Sans GB", sans-serif;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: env(safe-area-inset-top, 1.5rem) 1rem
+               env(safe-area-inset-bottom, 1rem);
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+    header {
+      text-align: center;
+      padding: 2.5rem 0 1.5rem;
+    }
+    header h1 {
+      font-size: 2rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      background: linear-gradient(135deg, #a89af7, #6ee7f7);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    header p { color: var(--text-muted); font-size: 0.82rem; margin-top: 4px; }
+
+    /* ── Status pill ─────────────────────────────────────────────────────── */
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      background: var(--surface);
+      border-radius: 999px;
+      padding: 6px 16px;
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      margin-bottom: 2.5rem;
+    }
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--text-muted);
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .dot.ok      { background: var(--green); }
+    .dot.rec     { background: var(--red);   animation: blink 0.9s infinite; }
+    .dot.think   { background: var(--accent);animation: blink 0.5s infinite; }
+
+    @keyframes blink {
+      0%,100% { opacity: 1; } 50% { opacity: 0.25; }
+    }
+
+    /* ── Mic button ──────────────────────────────────────────────────────── */
+    .mic-area {
+      position: relative;
+      margin: 0.5rem 0 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* Animated ring (recording state) */
+    .ring {
+      position: absolute;
+      inset: -14px;
+      border-radius: 50%;
+      border: 2.5px solid var(--accent);
+      opacity: 0;
+      pointer-events: none;
+    }
+    .ring.show { animation: ripple 1.1s ease-out infinite; }
+    @keyframes ripple {
+      0%   { opacity: 0.8; transform: scale(1);   }
+      100% { opacity: 0;   transform: scale(1.35);}
+    }
+
+    /* Waveform visualiser drawn on canvas under the button */
+    #waveCanvas {
+      position: absolute;
+      inset: -24px;
+      border-radius: 50%;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    #waveCanvas.show { opacity: 1; }
+
+    #micBtn {
+      position: relative;
+      width: 92px; height: 92px;
+      border-radius: 50%;
+      border: none;
+      background: var(--surface2);
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 6px 32px rgba(0,0,0,0.45);
+      transition: background 0.25s, box-shadow 0.25s, transform 0.1s;
+      outline: none;
+    }
+    #micBtn:active          { transform: scale(0.93); }
+    #micBtn.rec             { background: #2a1020; box-shadow: 0 0 0 0 #0000, 0 6px 28px rgba(255,80,80,0.25); }
+    #micBtn.think           { background: #12123a; box-shadow: 0 0 20px var(--accent-glow); }
+    #micBtn:disabled        { opacity: 0.4; cursor: not-allowed; }
+    #micBtn svg             { width: 38px; height: 38px; color: var(--text); }
+    #micBtn.rec svg         { color: var(--red);  }
+    #micBtn.think svg       { color: var(--accent); }
+
+    .hint {
+      color: var(--text-muted);
+      font-size: 0.83rem;
+      text-align: center;
+      min-height: 1.2em;
+    }
+
+    /* ── Chat log ────────────────────────────────────────────────────────── */
+    .chat {
+      width: 100%;
+      max-width: 480px;
+      margin-top: 1.8rem;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding-bottom: 1rem;
+    }
+    .bubble {
+      padding: 9px 14px;
+      border-radius: var(--radius);
+      font-size: 0.88rem;
+      line-height: 1.55;
+      max-width: 82%;
+      animation: pop 0.25s cubic-bezier(.34,1.6,.64,1);
+    }
+    @keyframes pop {
+      from { opacity:0; transform: scale(0.88) translateY(6px); }
+      to   { opacity:1; transform: scale(1)    translateY(0); }
+    }
+    .bubble.user {
+      background: var(--accent);
+      color: #fff;
+      align-self: flex-end;
+      border-bottom-right-radius: 4px;
+    }
+    .bubble.assistant {
+      background: var(--surface2);
+      color: var(--text);
+      align-self: flex-start;
+      border-bottom-left-radius: 4px;
+    }
+    .bubble.info {
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 0.78rem;
+      align-self: center;
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>OLIVIA</h1>
+  <p>AI 语音助手</p>
+</header>
+
+<div class="status-pill">
+  <div class="dot" id="dot"></div>
+  <span id="statusTxt">连接中...</span>
+</div>
+
+<div class="mic-area">
+  <canvas id="waveCanvas" width="140" height="140"></canvas>
+  <div  class="ring"  id="ring"></div>
+  <button id="micBtn" disabled>
+    <!-- Mic icon (idle / thinking) -->
+    <svg id="iconMic" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="9" y="2" width="6" height="13" rx="3"/>
+      <path d="M5 10a7 7 0 0 0 14 0"/>
+      <line x1="12" y1="19" x2="12" y2="22"/>
+      <line x1="9"  y1="22" x2="15" y2="22"/>
+    </svg>
+  </button>
+</div>
+
+<p class="hint" id="hint">点击麦克风开始说话</p>
+
+<div class="chat" id="chat"></div>
+
+<script>
+// ── Config ────────────────────────────────────────────────────────────────────
+const WS_URL          = `ws://${location.host}/ws/audio`;
+const TARGET_SR       = 16000;
+const SEND_CHUNK      = 8192;       // bytes per WebSocket binary frame
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let ws             = null;
+let recording      = false;
+let audioCtx       = null;
+let processor      = null;
+let analyser       = null;
+let micStream      = null;
+let audioChunks    = [];            // final reply MP3 fragments
+let statusAudioBuf = [];            // status-hint MP3 fragments
+let inStatusAudio  = false;
+
+// ── DOM ───────────────────────────────────────────────────────────────────────
+const micBtn    = document.getElementById('micBtn');
+const ring      = document.getElementById('ring');
+const dot       = document.getElementById('dot');
+const statusTxt = document.getElementById('statusTxt');
+const hint      = document.getElementById('hint');
+const chat      = document.getElementById('chat');
+const waveCanv  = document.getElementById('waveCanvas');
+const waveCtx   = waveCanv.getContext('2d');
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function setStatus(state, text) {
+  dot.className    = 'dot ' + state;
+  statusTxt.textContent = text;
+}
+
+function addBubble(cls, text) {
+  const el = document.createElement('div');
+  el.className = 'bubble ' + cls;
+  el.textContent = text;
+  chat.appendChild(el);
+  el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  return el;
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function connect() {
+  ws = new WebSocket(WS_URL);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    setStatus('ok', '已连接');
+    micBtn.disabled = false;
+    hint.textContent = '点击麦克风开始说话';
+  };
+
+  ws.onclose = () => {
+    setStatus('', '已断开，正在重连...');
+    micBtn.disabled = true;
+    _cleanupRecording(false);
+    setTimeout(connect, 2500);
+  };
+
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = async (evt) => {
+    // Binary frame = audio data
+    if (evt.data instanceof ArrayBuffer) {
+      if (inStatusAudio) statusAudioBuf.push(evt.data);
+      else               audioChunks.push(evt.data);
+      return;
+    }
+
+    const msg = evt.data;
+
+    if (msg === 'DONE') {
+      _idle();
+      addBubble('assistant', '🔈 播放回复中...');
+      const mp3 = audioChunks.splice(0);
+      if (mp3.length) await playChunks(mp3);
+
+    } else if (msg === 'EMPTY') {
+      _idle('未检测到语音，请重试');
+      audioChunks = [];
+
+    } else if (msg.startsWith('STATUS:')) {
+      const txt = msg.slice(7);
+      addBubble('info', '⏳ ' + txt);
+      hint.textContent = txt;
+      inStatusAudio = true;
+      statusAudioBuf = [];
+
+    } else if (msg === 'STATUS_AUDIO_DONE') {
+      inStatusAudio = false;
+      const clips = statusAudioBuf.splice(0);
+      if (clips.length) await playChunks(clips);
+
+    } else if (msg.startsWith('ERROR:')) {
+      _idle('出错了，请重试');
+      addBubble('info', '⚠️ ' + msg.slice(6));
+      audioChunks = [];
+    }
+    // PONG : ignore
+  };
+
+  setInterval(() => {
+    if (ws?.readyState === WebSocket.OPEN) ws.send('PING');
+  }, 20000);
+}
+
+// ── Audio playback ────────────────────────────────────────────────────────────
+async function playChunks(chunks) {
+  const blob = new Blob(chunks, { type: 'audio/mpeg' });
+  const buf  = await blob.arrayBuffer();
+  const ctx  = new (window.AudioContext || window.webkitAudioContext)();
+  try {
+    const decoded = await ctx.decodeAudioData(buf);
+    const src = ctx.createBufferSource();
+    src.buffer = decoded;
+    src.connect(ctx.destination);
+    src.start(0);
+    await new Promise(r => { src.onended = r; });
+  } finally {
+    ctx.close();
+  }
+}
+
+// ── Microphone ────────────────────────────────────────────────────────────────
+async function startRecording() {
+  if (recording) return;
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount:     1,
+        sampleRate:       TARGET_SR,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl:  true,
+      }
+    });
+  } catch (e) {
+    hint.textContent = '无法访问麦克风：' + e.message;
+    return;
+  }
+
+  // Try to get AudioContext at 16 kHz; fall back to native rate + JS resample
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+    sampleRate: TARGET_SR,
+  });
+  const actualSR = audioCtx.sampleRate;
+
+  const source = audioCtx.createMediaStreamSource(micStream);
+
+  // Analyser for the waveform visualiser
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  source.connect(analyser);
+
+  // ScriptProcessorNode — captures raw float32 PCM
+  processor = audioCtx.createScriptProcessor(4096, 1, 1);
+  let overflow = new Int16Array(0);
+
+  processor.onaudioprocess = (e) => {
+    if (!recording) return;
+    const f32 = e.inputBuffer.getChannelData(0);
+    const resampled = (actualSR === TARGET_SR) ? f32 : resample(f32, actualSR, TARGET_SR);
+    const i16 = f32ToI16(resampled);
+
+    // Merge with leftover from previous block
+    const merged = new Int16Array(overflow.length + i16.length);
+    merged.set(overflow);
+    merged.set(i16, overflow.length);
+    overflow = merged;
+
+    // Send full chunks
+    while (overflow.byteLength >= SEND_CHUNK) {
+      const slice = overflow.slice(0, SEND_CHUNK >> 1);
+      overflow = overflow.slice(SEND_CHUNK >> 1);
+      if (ws?.readyState === WebSocket.OPEN) ws.send(slice.buffer);
+    }
+  };
+
+  analyser.connect(processor);
+  processor.connect(audioCtx.destination);
+
+  recording = true;
+  audioChunks = [];
+  micBtn.className = 'rec';
+  ring.className   = 'ring show';
+  waveCanv.className = 'show';
+  setStatus('rec', '录音中...');
+  hint.textContent = '再次点击停止录音';
+  addBubble('user', '🎙 录音中...');
+  drawWave();
+}
+
+function stopRecording() {
+  if (!recording) return;
+  recording = false;
+  _cleanupRecording(true);
+}
+
+function _cleanupRecording(sendEnd) {
+  cancelAnimationFrame(_rafId);
+  if (processor)  { processor.disconnect();  processor = null; }
+  if (analyser)   { analyser.disconnect();   analyser  = null; }
+  if (audioCtx)   { audioCtx.close();        audioCtx  = null; }
+  if (micStream)  { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  waveCanv.className = '';
+  ring.className = 'ring';
+
+  if (sendEnd && ws?.readyState === WebSocket.OPEN) {
+    ws.send('END');
+    micBtn.className = 'think';
+    setStatus('think', 'AI 思考中...');
+    hint.textContent = '正在处理...';
+  }
+}
+
+function _idle(hintMsg = '点击麦克风开始说话') {
+  micBtn.className = '';
+  ring.className   = 'ring';
+  setStatus('ok', '已连接');
+  hint.textContent = hintMsg;
+}
+
+micBtn.addEventListener('click', () => {
+  if (recording) stopRecording();
+  else           startRecording();
+});
+
+// ── Waveform visualiser ───────────────────────────────────────────────────────
+let _rafId = 0;
+function drawWave() {
+  if (!analyser) return;
+  _rafId = requestAnimationFrame(drawWave);
+  const W = waveCanv.width, H = waveCanv.height;
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteTimeDomainData(data);
+
+  waveCtx.clearRect(0, 0, W, H);
+  const cx = W / 2, cy = H / 2, r = W / 2 - 14;
+
+  waveCtx.beginPath();
+  const step = (2 * Math.PI) / data.length;
+  for (let i = 0; i < data.length; i++) {
+    const amp = ((data[i] / 128) - 1) * 16;
+    const angle = i * step - Math.PI / 2;
+    const x = cx + (r + amp) * Math.cos(angle);
+    const y = cy + (r + amp) * Math.sin(angle);
+    i === 0 ? waveCtx.moveTo(x, y) : waveCtx.lineTo(x, y);
+  }
+  waveCtx.closePath();
+  waveCtx.strokeStyle = 'rgba(124,111,247,0.65)';
+  waveCtx.lineWidth = 2;
+  waveCtx.stroke();
+}
+
+// ── DSP helpers ───────────────────────────────────────────────────────────────
+function f32ToI16(buf) {
+  const out = new Int16Array(buf.length);
+  for (let i = 0; i < buf.length; i++)
+    out[i] = Math.max(-32768, Math.min(32767, buf[i] * 32768));
+  return out;
+}
+
+function resample(src, fromSR, toSR) {
+  const ratio = fromSR / toSR;
+  const len   = Math.floor(src.length / ratio);
+  const out   = new Float32Array(len);
+  for (let i = 0; i < len; i++) {
+    const pos  = i * ratio;
+    const lo   = Math.floor(pos);
+    const hi   = Math.min(lo + 1, src.length - 1);
+    out[i] = src[lo] + (src[hi] - src[lo]) * (pos - lo);  // linear interpolation
+  }
+  return out;
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+connect();
+</script>
+</body>
+</html>

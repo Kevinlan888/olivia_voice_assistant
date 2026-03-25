@@ -32,19 +32,29 @@ olivia/
 │   ├── ws_client.py        # WebSocket 客户端
 │   ├── main.py             # 客户端主入口
 │   └── requirements.txt
+├── web_client/
+│   └── index.html          # 手机网页客户端（单文件，无需安装）
 ├── server/
 │   ├── config.py           # 服务端配置（pydantic-settings）
 │   ├── main.py             # FastAPI 应用 + WebSocket 端点
+│   ├── agent.py            # ToolAgent（Function Calling 循环）
 │   ├── asr/
 │   │   └── whisper_asr.py  # Faster-Whisper ASR
 │   ├── llm/
 │   │   ├── base.py
 │   │   ├── openai_llm.py   # OpenAI / 兼容 API
 │   │   └── ollama_llm.py   # Ollama 本地模型
+│   ├── tools/
+│   │   ├── definitions.py  # Function Calling schema
+│   │   ├── weather.py      # 查天气（wttr.in）
+│   │   ├── smart_home.py   # 控制智能家居
+│   │   └── web_search.py   # 联网搜索（DuckDuckGo）
 │   └── tts/
 │       ├── base.py
 │       ├── edge_tts_engine.py  # Microsoft Edge TTS（免费）
 │       └── sovits_tts.py       # GPT-SoVITS（本地克隆音色）
+├── .vscode/
+│   └── launch.json         # VS Code 调试配置
 ├── .env.example
 └── README.md
 ```
@@ -84,6 +94,20 @@ uvicorn server.main:app --host 0.0.0.0 --port 8000 --reload
 pip install -r client/requirements.txt
 python -m client.main
 ```
+
+### 4. 手机网页客户端
+
+服务端启动后，手机浏览器直接访问（无需安装任何 App）：
+
+```
+http://<服务器IP>:8000/
+```
+
+点击麦克风图标 → 说话 → 再次点击停止 → 播放 AI 回复。
+
+- 无需唤醒词，点击即用
+- 支持 iOS Safari / Android Chrome
+- 单文件纯 HTML，无框架依赖
 
 ---
 

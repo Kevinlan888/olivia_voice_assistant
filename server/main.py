@@ -21,10 +21,13 @@ WebSocket 协议 (文本帧 / 二进制帧):
 import asyncio
 import io
 import logging
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from .config import settings
 from .asr.whisper_asr import WhisperASR
@@ -50,13 +53,13 @@ tts: EdgeTTSEngine | SovitsTTS
 async def lifespan(app: FastAPI):
     global asr, llm, tts
     logger.info("Loading ASR model …")
-    asr = WhisperASR()
+    asr = await asyncio.to_thread(WhisperASR)
 
     logger.info(f"LLM provider: {settings.LLM_PROVIDER}")
-    llm = OpenAILLM() if settings.LLM_PROVIDER == "openai" else OllamaLLM()
+    llm = await asyncio.to_thread(OpenAILLM if settings.LLM_PROVIDER == "openai" else OllamaLLM)
 
     logger.info(f"TTS provider: {settings.TTS_PROVIDER}")
-    tts = EdgeTTSEngine() if settings.TTS_PROVIDER == "edge" else SovitsTTS()
+    tts = await asyncio.to_thread(EdgeTTSEngine if settings.TTS_PROVIDER == "edge" else SovitsTTS)
 
     logger.info("Olivia server ready.")
     yield
@@ -184,3 +187,11 @@ async def audio_endpoint(websocket: WebSocket):
         logger.exception("Unexpected WebSocket error")
     finally:
         audio_buffer.close()
+
+# ── Web client (mobile browser) ───────────────────────────────────────────────
+_WEB_CLIENT = Path(__file__).parent.parent / "web_client" / "index.html"
+
+@app.get("/", include_in_schema=False)
+async def web_app():
+    """Serve the single-page mobile web client."""
+    return FileResponse(_WEB_CLIENT, media_type="text/html")
