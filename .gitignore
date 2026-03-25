@@ -1,0 +1,99 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.whl
+MANIFEST
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.env.bak
+.venv.bak
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.json
+secrets.yaml
+
+# ── Faster-Whisper / model caches ─────────────────────────────────────────────
+models/
+*.bin
+*.onnx
+*.ot
+*.pt
+*.pth
+*.gguf
+huggingface/
+.cache/
+
+# ── Audio artefacts ───────────────────────────────────────────────────────────
+*.wav
+*.mp3
+*.pcm
+*.raw
+*.flac
+*.ogg
+recordings/
+output_audio/
+
+# ── GPT-SoVITS reference audio ────────────────────────────────────────────────
+ref_audio/
+sovits_weights/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+*.out
+
+# ── IDE / editors ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Testing / coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ── Type checking ─────────────────────────────────────────────────────────────
+.mypy_cache/
+.pytype/
+.pyre/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+.dockerenv
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+*.bak
+*.tmp
+*.temp

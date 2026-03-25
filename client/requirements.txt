@@ -1,0 +1,9 @@
+# Olivia Client Dependencies
+# Install system packages first (Debian/Raspberry Pi OS):
+#   sudo apt install portaudio19-dev libmpg123-dev python3-dev
+pydantic-settings>=2.2.0
+pyaudio>=0.2.14
+pvporcupine>=3.0.0     # wake word; needs a free PicoVoice AccessKey
+websockets>=12.0
+pygame>=2.5.2          # audio playback (MP3 + WAV)
+numpy>=1.24.0
