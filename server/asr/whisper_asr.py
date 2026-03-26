@@ -106,16 +106,18 @@ class WhisperASR:
         """Transcribe raw PCM bytes (int16, 16 kHz, mono) → text string."""
         audio_np = self._pcm_to_float32(raw_pcm)
 
+        lang = None if settings.WHISPER_LANGUAGE == "auto" else settings.WHISPER_LANGUAGE
         segments, info = self._model.transcribe(
             audio_np,
             beam_size=5,
-            language=None,          # auto-detect; pin to "zh" for Chinese-only
+            language=lang,
             vad_filter=True,        # skip silent segments automatically
             vad_parameters={"min_silence_duration_ms": 500},
         )
         logger.info("Detected language: %s (%.0f%%)", info.language, info.language_probability * 100)
 
-        text = " ".join(seg.text.strip() for seg in segments)
+        sep = "" if (lang or "") in ("zh", "ja", "ko") else " "
+        text = sep.join(seg.text.strip() for seg in segments)
         return text.strip()
 
     # ------------------------------------------------------------------

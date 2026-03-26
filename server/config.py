@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     WHISPER_DEVICE: str = "cpu"          # cpu / cuda
     WHISPER_COMPUTE_TYPE: str = "int8"   # int8 / float16 / float32
 
+    WHISPER_LANGUAGE: str = "zh"         # zh / en / ja / … or "auto" for auto-detect
+
     # ── LLM ──────────────────────────────────────────────────────────────────
     LLM_PROVIDER: Literal["openai", "ollama"] = "ollama"
 
