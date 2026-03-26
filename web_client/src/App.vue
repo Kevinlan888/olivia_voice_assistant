@@ -84,6 +84,8 @@ let audioCtx       = null
 let processor      = null
 let analyser       = null
 let micStream      = null
+let rawChunks      = []    // Float32Array chunks at native sample rate
+let nativeSR       = TARGET_SR
 let audioChunks    = []
 let statusAudioBuf = []
 let inStatusAudio  = false
@@ -459,8 +461,13 @@ async function startRecording() {
     return
   }
 
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SR })
-  const actualSR = audioCtx.sampleRate
+  // Create AudioContext at the device's native sample rate.
+  // iOS Safari ignores a forced sampleRate, so we always capture at native
+  // rate and resample offline on stop via OfflineAudioContext (much higher
+  // quality than manual linear interpolation).
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+  nativeSR = audioCtx.sampleRate
+  log('[Rec] AudioContext sampleRate=%d', nativeSR)
   const source   = audioCtx.createMediaStreamSource(micStream)
 
   analyser = audioCtx.createAnalyser()
@@ -468,24 +475,12 @@ async function startRecording() {
   source.connect(analyser)
 
   processor = audioCtx.createScriptProcessor(4096, 1, 1)
-  let overflow = new Int16Array(0)
+  rawChunks = []
 
   processor.onaudioprocess = (e) => {
     if (!recording) return
-    const f32      = e.inputBuffer.getChannelData(0)
-    const resampled = (actualSR === TARGET_SR) ? f32 : resample(f32, actualSR, TARGET_SR)
-    const i16      = f32ToI16(resampled)
-
-    const merged = new Int16Array(overflow.length + i16.length)
-    merged.set(overflow)
-    merged.set(i16, overflow.length)
-    overflow = merged
-
-    while (overflow.byteLength >= SEND_CHUNK) {
-      const slice = overflow.slice(0, SEND_CHUNK >> 1)
-      overflow    = overflow.slice(SEND_CHUNK >> 1)
-      if (ws?.readyState === WebSocket.OPEN) ws.send(slice.buffer)
-    }
+    // Buffer raw float32 at native rate; resampling happens offline on stop.
+    rawChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)))
   }
 
   analyser.connect(processor)
@@ -520,11 +515,15 @@ function _cleanupRecording(sendEnd) {
     audioChunks = []
     if (streamPlayer) streamPlayer.stop()
     streamPlayer = createStreamPlayer()
-    ws.send('END')
     micState.value = 'think'
     setStatus('think', 'AI 思考中...')
     hintText.value          = '正在处理...'
     processStatusText.value = '正在处理...'
+    const chunks = rawChunks.splice(0)
+    const sr     = nativeSR
+    _resampleAndSend(chunks, sr)  // async, fire-and-forget
+  } else {
+    rawChunks = []
   }
 }
 
@@ -633,17 +632,45 @@ function f32ToI16(buf) {
   return out
 }
 
-function resample(src, fromSR, toSR) {
-  const ratio = fromSR / toSR
-  const len   = Math.floor(src.length / ratio)
-  const out   = new Float32Array(len)
-  for (let i = 0; i < len; i++) {
-    const pos = i * ratio
-    const lo  = Math.floor(pos)
-    const hi  = Math.min(lo + 1, src.length - 1)
-    out[i]    = src[lo] + (src[hi] - src[lo]) * (pos - lo)
+// Resample & send via OfflineAudioContext, then fire END.
+// Called after the user releases the mic button.
+async function _resampleAndSend(chunks, fromSR) {
+  if (!chunks.length) { if (ws?.readyState === WebSocket.OPEN) ws.send('END'); return }
+
+  // Concatenate all captured Float32 chunks
+  const totalLen = chunks.reduce((s, c) => s + c.length, 0)
+  const merged   = new Float32Array(totalLen)
+  let off = 0
+  for (const c of chunks) { merged.set(c, off); off += c.length }
+
+  // Resample to 16 kHz using the browser's built-in resampler.
+  // OfflineAudioContext handles the anti-aliasing correctly; simple linear
+  // interpolation (the old approach) caused audible distortion on iOS.
+  let resampled
+  if (fromSR === TARGET_SR) {
+    resampled = merged
+  } else {
+    const outLen = Math.ceil(totalLen * TARGET_SR / fromSR)
+    const offCtx = new OfflineAudioContext(1, outLen, TARGET_SR)
+    const buf    = offCtx.createBuffer(1, totalLen, fromSR)
+    buf.getChannelData(0).set(merged)
+    const src = offCtx.createBufferSource()
+    src.buffer = buf
+    src.connect(offCtx.destination)
+    src.start(0)
+    const rendered = await offCtx.startRendering()
+    resampled = rendered.getChannelData(0)
   }
-  return out
+  log('[Rec] resampled %d → %d samples (%dHz → %dHz)', totalLen, resampled.length, fromSR, TARGET_SR)
+
+  // Convert to Int16 and send in chunks
+  const i16       = f32ToI16(resampled)
+  const chunkSize = SEND_CHUNK >> 1   // samples per chunk
+  for (let i = 0; i < i16.length; i += chunkSize) {
+    if (ws?.readyState !== WebSocket.OPEN) return
+    ws.send(i16.slice(i, i + chunkSize).buffer)
+  }
+  if (ws?.readyState === WebSocket.OPEN) ws.send('END')
 }
 
 /* ── Visibility / background handling ────────────────────────────────────── */
