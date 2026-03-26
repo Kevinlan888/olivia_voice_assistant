@@ -31,6 +31,7 @@ from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .asr.whisper_asr import WhisperASR
@@ -217,10 +218,23 @@ async def audio_endpoint(websocket: WebSocket):
     finally:
         audio_buffer.close()
 
-# ── Web client (mobile browser) ───────────────────────────────────────────────
-_WEB_CLIENT = Path(__file__).parent.parent / "web_client" / "index.html"
+# ── Web client (Vue SPA built with Vite) ─────────────────────────────────────
+_DIST = Path(__file__).parent.parent / "web_client" / "dist"
+
+# Mount /assets → dist/assets so Vite's hashed JS/CSS bundles are served.
+# This is set up at module load time; run `cd web_client && npm run build` first.
+_assets_dir = _DIST / "assets"
+if _assets_dir.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="static_assets")
+
 
 @app.get("/", include_in_schema=False)
 async def web_app():
-    """Serve the single-page mobile web client."""
-    return FileResponse(_WEB_CLIENT, media_type="text/html")
+    """Serve the Vue SPA entry point."""
+    idx = _DIST / "index.html"
+    if not idx.exists():
+        return FileResponse(
+            Path(__file__).parent.parent / "web_client" / "index.html",
+            media_type="text/html",
+        )
+    return FileResponse(idx, media_type="text/html")

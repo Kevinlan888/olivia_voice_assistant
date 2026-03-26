@@ -97,3 +97,8 @@ htmlcov/
 *.bak
 *.tmp
 *.temp
+
+# ── nodejs ───────────────────────────────────────────────────────
+node_modules/
+dist/
+build/
