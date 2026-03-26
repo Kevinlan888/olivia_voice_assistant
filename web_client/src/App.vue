@@ -81,9 +81,10 @@ const chatRef       = ref(null)
 let ws             = null
 let recording      = false
 let audioCtx       = null
-let processor      = null
-let analyser       = null
-let micStream      = null
+let processor         = null
+let audioWorkletNode  = null
+let analyser          = null
+let micStream         = null
 let rawChunks      = []    // Float32Array chunks at native sample rate
 let nativeSR       = TARGET_SR
 let audioChunks    = []
@@ -474,17 +475,49 @@ async function startRecording() {
   analyser.fftSize = 256
   source.connect(analyser)
 
-  processor = audioCtx.createScriptProcessor(4096, 1, 1)
   rawChunks = []
 
-  processor.onaudioprocess = (e) => {
-    if (!recording) return
-    // Buffer raw float32 at native rate; resampling happens offline on stop.
-    rawChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)))
+  // Prefer AudioWorklet (runs on audio thread → no main-thread dropouts).
+  // Fall back to the deprecated ScriptProcessor for very old browsers.
+  let usedWorklet = false
+  if (audioCtx.audioWorklet) {
+    try {
+      const workletCode = `
+class RecorderProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0]?.[0]
+    if (ch && ch.length > 0) this.port.postMessage(ch.slice())
+    return true
+  }
+}
+registerProcessor('recorder-processor', RecorderProcessor)`
+      const blob = new Blob([workletCode], { type: 'application/javascript' })
+      const url  = URL.createObjectURL(blob)
+      try { await audioCtx.audioWorklet.addModule(url) } finally { URL.revokeObjectURL(url) }
+      audioWorkletNode = new AudioWorkletNode(audioCtx, 'recorder-processor')
+      audioWorkletNode.port.onmessage = (e) => {
+        if (recording) rawChunks.push(new Float32Array(e.data))
+      }
+      analyser.connect(audioWorkletNode)
+      audioWorkletNode.connect(audioCtx.destination)
+      usedWorklet = true
+      log('[Rec] Using AudioWorklet')
+    } catch (err) {
+      log('[Rec] AudioWorklet init failed, falling back to ScriptProcessor: %s', err)
+      if (audioWorkletNode) { try { audioWorkletNode.disconnect() } catch {} audioWorkletNode = null }
+    }
   }
 
-  analyser.connect(processor)
-  processor.connect(audioCtx.destination)
+  if (!usedWorklet) {
+    processor = audioCtx.createScriptProcessor(4096, 1, 1)
+    processor.onaudioprocess = (e) => {
+      if (!recording) return
+      rawChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)))
+    }
+    analyser.connect(processor)
+    processor.connect(audioCtx.destination)
+    log('[Rec] Using ScriptProcessor (fallback)')
+  }
 
   recording         = true
   isRecording.value = true
@@ -506,8 +539,9 @@ function stopRecording() {
 function _cleanupRecording(sendEnd) {
   cancelAnimationFrame(_rafId)
   isRecording.value = false
-  if (processor) { processor.disconnect(); processor = null }
-  if (analyser)  { analyser.disconnect();  analyser  = null }
+  if (audioWorkletNode) { audioWorkletNode.disconnect(); audioWorkletNode = null }
+  if (processor)        { processor.disconnect();        processor         = null }
+  if (analyser)         { analyser.disconnect();         analyser          = null }
   if (audioCtx)  { audioCtx.close();       audioCtx  = null }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null }
 
