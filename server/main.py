@@ -24,6 +24,7 @@ import asyncio
 import io
 import logging
 import os
+import wave
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -46,6 +47,24 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _save_audio(raw_pcm: bytes) -> None:
+    """Save raw PCM bytes as a WAV file under settings.SAVE_UPLOAD_AUDIO_DIR."""
+    try:
+        out_dir = Path(settings.SAVE_UPLOAD_AUDIO_DIR)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        out_path = out_dir / f"{timestamp}.wav"
+        with wave.open(str(out_path), "wb") as wf:
+            wf.setnchannels(settings.AUDIO_CHANNELS)
+            wf.setsampwidth(settings.AUDIO_SAMPLE_WIDTH)
+            wf.setframerate(settings.AUDIO_SAMPLE_RATE)
+            wf.writeframes(raw_pcm)
+        logger.info("[SAVE_AUDIO] %s", out_path)
+    except Exception as exc:
+        logger.warning("[SAVE_AUDIO] Failed to save audio: %s", exc)
+
 
 # ── Component singletons (initialised once at startup) ────────────────────────
 asr: WhisperASR
@@ -178,6 +197,10 @@ async def audio_endpoint(websocket: WebSocket):
                     continue
 
                 try:
+                    # 0. Optionally persist the raw audio for ASR analysis
+                    if settings.SAVE_UPLOAD_AUDIO:
+                        _save_audio(raw_pcm)
+
                     # 1. ASR
                     text = await asyncio.to_thread(asr.transcribe, raw_pcm)
                     logger.info("[ASR] %s", text)

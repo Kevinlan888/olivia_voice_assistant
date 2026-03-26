@@ -50,7 +50,10 @@ class Settings(BaseSettings):
     AUDIO_SAMPLE_RATE: int = 16000
     AUDIO_CHANNELS: int = 1
     AUDIO_SAMPLE_WIDTH: int = 2  # bytes (int16)
-
+    # When True, every uploaded audio clip is saved as a WAV file under
+    # SAVE_UPLOAD_AUDIO_DIR for later ASR analysis / debugging.
+    SAVE_UPLOAD_AUDIO: bool = False
+    SAVE_UPLOAD_AUDIO_DIR: str = "audio_logs"
     class Config:
         env_file = ".env"
         extra = "ignore"
