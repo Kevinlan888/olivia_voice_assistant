@@ -790,6 +790,11 @@ onUnmounted(() => {
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+html, body, #app {
+  height: 100%;
+  min-height: 0;
+}
+
 body {
   background: var(--bg);
   color: var(--text);
@@ -812,10 +817,12 @@ body {
   width: 100%;
   max-width: 480px;
   flex: 1;
+  height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
+  overflow: hidden;
   /* leave room for the fixed bottom bar (~190px) */
   padding-bottom: 190px;
 }
@@ -961,6 +968,7 @@ header p { color: var(--text-muted); font-size: 0.82rem; margin-top: 4px; }
 .chat {
   width: 100%;
   flex: 1;
+  flex-basis: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
