@@ -101,6 +101,7 @@ let _rafId          = 0
 let _msgIdCtr       = 0
 let _connectAttempt = 0
 let _connectAt      = 0   // timestamp of last new WebSocket()
+let _pingIntervalId = null
 
 const _isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
@@ -164,22 +165,33 @@ function _setMicPermission(state) {
   }
 }
 
+async function syncMicPermission() {
+  if (!navigator.permissions?.query) return micPermission
+  try {
+    const status = await navigator.permissions.query({ name: 'microphone' })
+    _setMicPermission(status.state)
+    status.onchange = () => _setMicPermission(status.state)
+    return status.state
+  } catch {
+    return micPermission
+  }
+}
+
 async function ensureMicPermission() {
   if (!navigator.mediaDevices?.getUserMedia) {
     _setMicPermission('denied')
     hintText.value = '当前浏览器不支持麦克风'
     return false
   }
-  if (micPermission === 'granted') return true
-  try {
-    const tmp = await navigator.mediaDevices.getUserMedia({ audio: true })
-    tmp.getTracks().forEach(t => t.stop())
-    micPermission = 'granted'
-    return true
-  } catch {
+
+  const permissionState = await syncMicPermission()
+  if (permissionState === 'granted') return true
+  if (permissionState === 'denied') {
     _setMicPermission('denied')
     return false
   }
+
+  return true
 }
 
 /* ── Audio unlock (iOS) ────────────────────────────────────────────────────── */
@@ -372,7 +384,7 @@ function connect() {
     ws.close()
   }
 
-  ws.onmessage = async (evt) => {
+  ws.onmessage = async (evt) => { try {
     if (evt.data instanceof ArrayBuffer) {
       if (inStatusAudio)                      statusAudioBuf.push(evt.data)
       else if (streamPlayer && !streamPlayer.failed) streamPlayer.push(evt.data)
@@ -432,11 +444,20 @@ function connect() {
       if (streamPlayer) { streamPlayer.stop(); streamPlayer = null }
     }
     // 'PONG': ignore
-  }
+  } catch (err) {
+    log('[WS] onmessage error: %s', err)
+    _idle('出错了，请重试')
+    processStatusText.value = ''
+    audioChunks = []
+    if (pendingMsgId !== null) { removeMessage(pendingMsgId); pendingMsgId = null }
+    if (streamPlayer) { streamPlayer.stop(); streamPlayer = null }
+  } }
 
-  setInterval(() => {
-    if (ws?.readyState === WebSocket.OPEN) ws.send('PING')
-  }, 20000)
+  if (_pingIntervalId === null) {
+    _pingIntervalId = setInterval(() => {
+      if (ws?.readyState === WebSocket.OPEN) ws.send('PING')
+    }, 20000)
+  }
 }
 
 /* ── Microphone ────────────────────────────────────────────────────────────── */
@@ -457,7 +478,9 @@ async function startRecording() {
         autoGainControl:  true,
       },
     })
+    _setMicPermission('granted')
   } catch (e) {
+    _setMicPermission('denied')
     hintText.value = '无法访问麦克风：' + e.message
     return
   }
@@ -493,7 +516,8 @@ class RecorderProcessor extends AudioWorkletProcessor {
 registerProcessor('recorder-processor', RecorderProcessor)`
       const blob = new Blob([workletCode], { type: 'application/javascript' })
       const url  = URL.createObjectURL(blob)
-      try { await audioCtx.audioWorklet.addModule(url) } finally { URL.revokeObjectURL(url) }
+      await audioCtx.audioWorklet.addModule(url)
+      URL.revokeObjectURL(url)
       audioWorkletNode = new AudioWorkletNode(audioCtx, 'recorder-processor')
       audioWorkletNode.port.onmessage = (e) => {
         if (recording) rawChunks.push(new Float32Array(e.data))
@@ -574,11 +598,6 @@ async function beginPressToTalk(source) {
     holdSource = null
     hintText.value = '连接未就绪，请稍后'
     return
-  }
-
-  if (micPermission !== 'granted') {
-    const granted = await ensureMicPermission()
-    if (!granted) { holdSource = null; return }
   }
 
   await startRecording()
@@ -662,7 +681,7 @@ function drawWave() {
 function f32ToI16(buf) {
   const out = new Int16Array(buf.length)
   for (let i = 0; i < buf.length; i++)
-    out[i] = Math.max(-32768, Math.min(32767, buf[i] * 32768))
+    out[i] = Math.max(-32768, Math.min(32767, buf[i] * 32767))
   return out
 }
 
@@ -748,6 +767,7 @@ function onOffline() { log('[Net] offline') }
 /* ── Lifecycle ─────────────────────────────────────────────────────────────── */
 onMounted(() => {
   connect()
+  syncMicPermission()
   window.addEventListener('keydown',          onKeyDown)
   window.addEventListener('keyup',            onKeyUp)
   window.addEventListener('blur',             onWindowBlur)
@@ -760,6 +780,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (ws) ws.close()
+  if (_pingIntervalId !== null) { clearInterval(_pingIntervalId); _pingIntervalId = null }
   window.removeEventListener('keydown',          onKeyDown)
   window.removeEventListener('keyup',            onKeyUp)
   window.removeEventListener('blur',             onWindowBlur)
