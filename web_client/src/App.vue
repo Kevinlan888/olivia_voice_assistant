@@ -93,9 +93,28 @@ let micPermission   = 'unknown'
 let sharedAudioCtx  = null
 let _rafId          = 0
 let _msgIdCtr       = 0
+let _connectAttempt = 0
+let _connectAt      = 0   // timestamp of last new WebSocket()
 
 const _isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+
+/* ── Logger ────────────────────────────────────────────────────────────────── */
+function log(fmt, ...args) {
+  const t = new Date().toISOString().slice(11, 23) // HH:MM:SS.mmm
+  // vConsole doesn't expand %s/%d — interpolate manually
+  let i = 0
+  const msg = fmt.replace(/%[sd]/g, () => {
+    const v = args[i++]
+    return v === undefined ? '' : v
+  })
+  const rest = args.slice(i)
+  console.log(`[Olivia ${t}] ${msg}`, ...rest)
+}
+
+log('Page loaded. isIOS=%s UA=%s', _isIOS, navigator.userAgent)
+log('WS_URL=%s', WS_URL)
+log('visibility=%s', document.visibilityState)
 
 /* ── Message helpers ───────────────────────────────────────────────────────── */
 function addMessage(type, text) {
@@ -289,18 +308,51 @@ function stopPlayback() {
 }
 
 /* ── WebSocket ─────────────────────────────────────────────────────────────── */
+let _connectTimeoutId = null
+
+function _clearConnectTimeout() {
+  if (_connectTimeoutId !== null) { clearTimeout(_connectTimeoutId); _connectTimeoutId = null }
+}
+
 function connect() {
+  // Avoid stacking multiple pending connections
+  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+    log('[WS] connect() skipped — already readyState=%s', ws.readyState)
+    return
+  }
+
+  _connectAttempt++
+  _connectAt = performance.now()
+  log('[WS] connect() attempt #%d  visibility=%s  online=%s',
+      _connectAttempt, document.visibilityState, navigator.onLine)
   ws = new WebSocket(WS_URL)
   ws.binaryType = 'arraybuffer'
 
+  // Timeout: if still CONNECTING after 8 s, iOS Safari is likely blocking the
+  // WSS handshake due to an untrusted certificate. Force-close and retry.
+  _clearConnectTimeout()
+  _connectTimeoutId = setTimeout(() => {
+    if (ws && ws.readyState === WebSocket.CONNECTING) {
+      log('[WS] TIMEOUT — still CONNECTING after 8 s. Possible cause: ' +
+          'untrusted cert (install mkcert CA on iOS) or network issue. Forcing close.')
+      ws.close()
+    }
+  }, 8000)
+
   ws.onopen = () => {
+    _clearConnectTimeout()
+    const elapsed = (performance.now() - _connectAt).toFixed(0)
+    log('[WS] onopen  attempt #%d  elapsed=%sms', _connectAttempt, elapsed)
     setStatus('ok', '已连接')
     wsReady.value  = true
     hintText.value = '按住麦克风说话，松开发送'
     processStatusText.value = ''
   }
 
-  ws.onclose = () => {
+  ws.onclose = (evt) => {
+    _clearConnectTimeout()
+    log('[WS] onclose  code=%d  reason=%s  wasClean=%s',
+        evt.code, evt.reason || '(none)', evt.wasClean)
     setStatus('', '已断开，正在重连...')
     wsReady.value = false
     processStatusText.value = '连接已断开，正在重连...'
@@ -309,7 +361,10 @@ function connect() {
     setTimeout(connect, 2500)
   }
 
-  ws.onerror = () => ws.close()
+  ws.onerror = (evt) => {
+    log('[WS] onerror  type=%s  readyState=%s', evt.type, ws.readyState)
+    ws.close()
+  }
 
   ws.onmessage = async (evt) => {
     if (evt.data instanceof ArrayBuffer) {
@@ -588,19 +643,67 @@ function resample(src, fromSR, toSR) {
   return out
 }
 
+/* ── Visibility / background handling ────────────────────────────────────── */
+function onVisibilityChange() {
+  log('[Page] visibilitychange → %s  wsReadyState=%s',
+      document.visibilityState, ws ? ws.readyState : 'no-ws')
+
+  if (document.visibilityState === 'visible') {
+    // iOS may silently kill the WS while backgrounded; force reconnect if needed
+    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+      log('[Page] visible — WS dead, reconnecting immediately')
+      connect()
+    } else if (ws.readyState === WebSocket.OPEN) {
+      // Send a PING to verify the connection is actually alive
+      log('[Page] visible — WS appears open, sending PING to verify')
+      try { ws.send('PING') } catch (e) { log('[Page] PING failed: %s', e); ws.close() }
+    }
+  } else {
+    log('[Page] hidden — WS will likely be frozen/killed by iOS')
+  }
+}
+
+function onPageShow(evt) {
+  log('[Page] pageshow  persisted=%s (bfcache=%s)  wsReadyState=%s',
+      evt.persisted, evt.persisted ? 'YES — restored from cache' : 'no',
+      ws ? ws.readyState : 'no-ws')
+  // bfcache restore on iOS: page looks alive but WS is dead
+  if (evt.persisted && ws && ws.readyState !== WebSocket.OPEN) {
+    log('[Page] bfcache restore + dead WS, reconnecting')
+    connect()
+  }
+}
+
+function onPageHide(evt) {
+  log('[Page] pagehide  persisted=%s', evt.persisted)
+}
+
+function onOnline()  { log('[Net] online') }
+function onOffline() { log('[Net] offline') }
+
 /* ── Lifecycle ─────────────────────────────────────────────────────────────── */
 onMounted(() => {
   connect()
-  window.addEventListener('keydown', onKeyDown)
-  window.addEventListener('keyup',   onKeyUp)
-  window.addEventListener('blur',    onWindowBlur)
+  window.addEventListener('keydown',          onKeyDown)
+  window.addEventListener('keyup',            onKeyUp)
+  window.addEventListener('blur',             onWindowBlur)
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  window.addEventListener('pageshow',         onPageShow)
+  window.addEventListener('pagehide',         onPageHide)
+  window.addEventListener('online',           onOnline)
+  window.addEventListener('offline',          onOffline)
 })
 
 onUnmounted(() => {
   if (ws) ws.close()
-  window.removeEventListener('keydown', onKeyDown)
-  window.removeEventListener('keyup',   onKeyUp)
-  window.removeEventListener('blur',    onWindowBlur)
+  window.removeEventListener('keydown',          onKeyDown)
+  window.removeEventListener('keyup',            onKeyUp)
+  window.removeEventListener('blur',             onWindowBlur)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  window.removeEventListener('pageshow',         onPageShow)
+  window.removeEventListener('pagehide',         onPageHide)
+  window.removeEventListener('online',           onOnline)
+  window.removeEventListener('offline',          onOffline)
   cancelAnimationFrame(_rafId)
   if (sharedAudioCtx) { try { sharedAudioCtx.close() } catch {} }
 })
