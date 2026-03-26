@@ -10,36 +10,6 @@
       <span>{{ statusText }}</span>
     </div>
 
-    <div class="mic-area">
-      <canvas
-        ref="waveCanvasRef"
-        class="wave-canvas"
-        :class="{ show: isRecording }"
-        width="140"
-        height="140"
-      ></canvas>
-      <div class="ring" :class="{ show: isRecording }"></div>
-      <button
-        class="mic-btn"
-        :class="micState"
-        :disabled="!wsReady"
-        @pointerdown.prevent="onPointerDown"
-        @pointerup.prevent="onPointerUp"
-        @pointercancel="onPointerCancel"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="9" y="2" width="6" height="13" rx="3"/>
-          <path d="M5 10a7 7 0 0 0 14 0"/>
-          <line x1="12" y1="19" x2="12" y2="22"/>
-          <line x1="9"  y1="22" x2="15" y2="22"/>
-        </svg>
-      </button>
-    </div>
-
-    <p class="hint">{{ hintText }}</p>
-    <div class="process-status" :class="{ show: processStatusText }">{{ processStatusText }}</div>
-
     <div class="chat" ref="chatRef">
       <div
         v-for="msg in messages"
@@ -47,6 +17,39 @@
         class="bubble"
         :class="msg.type"
       >{{ msg.text }}</div>
+    </div>
+
+    <div class="bottom-bar">
+      <div class="process-status" :class="{ show: processStatusText }">{{ processStatusText }}</div>
+
+      <div class="mic-area">
+        <canvas
+          ref="waveCanvasRef"
+          class="wave-canvas"
+          :class="{ show: isRecording }"
+          width="140"
+          height="140"
+        ></canvas>
+        <div class="ring" :class="{ show: isRecording }"></div>
+        <button
+          class="mic-btn"
+          :class="micState"
+          :disabled="!wsReady"
+          @pointerdown.prevent="onPointerDown"
+          @pointerup.prevent="onPointerUp"
+          @pointercancel="onPointerCancel"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="2" width="6" height="13" rx="3"/>
+            <path d="M5 10a7 7 0 0 0 14 0"/>
+            <line x1="12" y1="19" x2="12" y2="22"/>
+            <line x1="9"  y1="22" x2="15" y2="22"/>
+          </svg>
+        </button>
+      </div>
+
+      <p class="hint">{{ hintText }}</p>
     </div>
   </div>
 </template>
@@ -735,8 +738,8 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: env(safe-area-inset-top, 1.5rem) 1rem
-           env(safe-area-inset-bottom, 1rem);
+  /* horizontal + top padding only; bottom handled by fixed bar */
+  padding: env(safe-area-inset-top, 1.5rem) 1rem 0;
   overflow: hidden;
   -webkit-tap-highlight-color: transparent;
   -webkit-user-select: none;
@@ -752,12 +755,14 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
+  /* leave room for the fixed bottom bar (~190px) */
+  padding-bottom: 190px;
 }
 
 /* ── Header ──────────────────────────────────────────────────────────────── */
 header {
   text-align: center;
-  padding: 2.5rem 0 1.5rem;
+  padding: 1.2rem 0 0.8rem;
 }
 header h1 {
   font-size: 2rem;
@@ -780,7 +785,7 @@ header p { color: var(--text-muted); font-size: 0.82rem; margin-top: 4px; }
   padding: 6px 16px;
   font-size: 0.82rem;
   color: var(--text-muted);
-  margin-bottom: 2.5rem;
+  margin-bottom: 0.75rem;
 }
 .dot {
   width: 8px; height: 8px;
@@ -800,7 +805,7 @@ header p { color: var(--text-muted); font-size: 0.82rem; margin-top: 4px; }
 /* ── Mic button ──────────────────────────────────────────────────────────── */
 .mic-area {
   position: relative;
-  margin: 0.5rem 0 1.5rem;
+  margin: 0.8rem 0 0.4rem;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -851,6 +856,23 @@ header p { color: var(--text-muted); font-size: 0.82rem; margin-top: 4px; }
 .mic-btn.think svg       { color: var(--accent); }
 .mic-btn, .mic-area      { touch-action: manipulation; }
 
+/* ── Bottom bar ──────────────────────────────────────────────────────────── */
+.bottom-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--bg);
+  /* subtle top border to separate from chat */
+  border-top: 1px solid rgba(124,111,247,0.12);
+  padding-top: 0.2rem;
+  padding-bottom: env(safe-area-inset-bottom, 1rem);
+  z-index: 10;
+}
+
 .hint {
   color: var(--text-muted);
   font-size: 0.83rem;
@@ -860,7 +882,7 @@ header p { color: var(--text-muted); font-size: 0.82rem; margin-top: 4px; }
 
 .process-status {
   min-height: 1.4em;
-  margin-top: 0.65rem;
+  margin-top: 0.4rem;
   padding: 0 0.75rem;
   color: #a89af7;
   font-size: 0.8rem;
@@ -879,13 +901,15 @@ header p { color: var(--text-muted); font-size: 0.82rem; margin-top: 4px; }
   width: 100%;
   flex: 1;
   min-height: 0;
-  margin-top: 1.8rem;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 0 2px 1rem;
+  padding: 0.5rem 2px 0.5rem;
   overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+  touch-action: pan-y;
   scrollbar-width: thin;
   scrollbar-color: rgba(124,111,247,0.45) transparent;
 }
