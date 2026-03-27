@@ -63,6 +63,25 @@ class WSClient:
         self._ping_task = asyncio.create_task(self._keepalive())
         logger.info("Connected.")
 
+    def _is_connected(self) -> bool:
+        """Compatibility check for websocket open state across websockets versions."""
+        if self._ws is None:
+            return False
+
+        # websockets legacy protocol objects expose `.closed` (bool)
+        closed = getattr(self._ws, "closed", None)
+        if isinstance(closed, bool):
+            return not closed
+
+        # newer ClientConnection exposes `.state` enum-like values
+        state = getattr(self._ws, "state", None)
+        if state is not None:
+            state_name = getattr(state, "name", str(state))
+            return str(state_name).upper() == "OPEN"
+
+        # If state cannot be determined, keep the existing connection.
+        return True
+
     async def disconnect(self) -> None:
         if self._ping_task:
             self._ping_task.cancel()
@@ -75,7 +94,7 @@ class WSClient:
         try:
             while True:
                 await asyncio.sleep(20)
-                if self._ws and not self._ws.closed:
+                if self._is_connected():
                     await self._ws.send("PING")
         except asyncio.CancelledError:
             pass
@@ -89,7 +108,7 @@ class WSClient:
         Returns:
             MP3 bytes on success, or None if the server returned EMPTY/ERROR.
         """
-        if self._ws is None or self._ws.closed:
+        if not self._is_connected():
             await self.connect()
 
         # 1. Stream audio in chunks

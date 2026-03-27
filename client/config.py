@@ -10,6 +10,8 @@ class ClientSettings(BaseSettings):
     # Set to empty string to disable wake-word gating.
     WAKE_WORD_KEYWORD: str = "alexa"
     WAKE_WORD_THRESHOLD: float = 0.5
+    WAKE_WORD_CONSECUTIVE_HITS: int = 2   # frames above threshold required to trigger
+    WAKE_WORD_COOLDOWN_SECONDS: float = 1.0  # ignore immediate retriggers after detection
 
     # ── Audio recording ───────────────────────────────────────────────────────
     SAMPLE_RATE: int = 16000

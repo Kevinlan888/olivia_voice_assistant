@@ -92,11 +92,19 @@ async def run() -> None:
     # Pre-connect to reduce first-utterance latency
     await ws.connect()
 
-    # Graceful shutdown on Ctrl-C
+    # Graceful shutdown on Ctrl-C.
+    # On Windows, ProactorEventLoop may not implement add_signal_handler.
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+    signal_handlers_registered = False
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop_event.set)
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+            signal_handlers_registered = True
+        except (NotImplementedError, RuntimeError):
+            # RuntimeError can occur in non-main-thread contexts.
+            signal_handlers_registered = False
+            break
 
     try:
         while not stop_event.is_set():
@@ -118,6 +126,13 @@ async def run() -> None:
             # ── Step 5: Play response ────────────────────────────────────────
             if audio_response:
                 await asyncio.to_thread(player.play, audio_response)
+
+            # Fallback for platforms without signal handler support.
+            if not signal_handlers_registered:
+                await asyncio.sleep(0)
+
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received, shutting down.")
 
     finally:
         await ws.disconnect()
