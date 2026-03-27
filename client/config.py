@@ -24,6 +24,7 @@ class ClientSettings(BaseSettings):
 
     # ── Playback ──────────────────────────────────────────────────────────────
     PLAYBACK_DEVICE_INDEX: int = -1     # -1 = system default
+    STREAM_PLAYBACK: bool = True         # play assistant audio progressively
 
     class Config:
         env_file = ".env"

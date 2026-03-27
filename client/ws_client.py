@@ -44,12 +44,14 @@ class WSClient:
         self,
         on_status=None,
         on_status_audio=None,
+        on_audio_chunk=None,
     ):
         self._url = settings.SERVER_WS_URL
         self._ws = None
         self._ping_task: asyncio.Task | None = None
         self._on_status = on_status
         self._on_status_audio = on_status_audio
+        self._on_audio_chunk = on_audio_chunk
 
     # ── Connection management ─────────────────────────────────────────────────
 
@@ -133,6 +135,8 @@ class WSClient:
                         status_audio_buf.write(message)
                     else:
                         audio_buf.write(message)
+                        if self._on_audio_chunk:
+                            await self._on_audio_chunk(message)
 
                 elif isinstance(message, str):
                     if message == "DONE":

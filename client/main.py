@@ -82,7 +82,16 @@ async def run() -> None:
         """Play the server-synthesised status audio clip immediately."""
         await asyncio.to_thread(player.play, mp3_bytes)
 
-    ws = WSClient(on_status=on_status, on_status_audio=on_status_audio)
+    async def on_audio_chunk(mp3_chunk: bytes) -> None:
+        """Queue assistant audio chunk for progressive playback."""
+        if settings.STREAM_PLAYBACK:
+            await asyncio.to_thread(player.feed_stream_chunk, mp3_chunk)
+
+    ws = WSClient(
+        on_status=on_status,
+        on_status_audio=on_status_audio,
+        on_audio_chunk=on_audio_chunk,
+    )
 
     if detector is None:
         logger.warning(
@@ -121,10 +130,14 @@ async def run() -> None:
                 continue
 
             # ── Step 4: Send to server, get TTS audio ────────────────────────
+            if settings.STREAM_PLAYBACK:
+                await asyncio.to_thread(player.start_stream)
             audio_response = await ws.process_audio(raw_pcm)
+            if settings.STREAM_PLAYBACK:
+                await asyncio.to_thread(player.stop_stream, True)
 
             # ── Step 5: Play response ────────────────────────────────────────
-            if audio_response:
+            if audio_response and not settings.STREAM_PLAYBACK:
                 await asyncio.to_thread(player.play, audio_response)
 
             # Fallback for platforms without signal handler support.
