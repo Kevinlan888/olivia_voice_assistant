@@ -5,11 +5,11 @@ class ClientSettings(BaseSettings):
     # ── Server connection ─────────────────────────────────────────────────────
     SERVER_WS_URL: str = "ws://localhost:8000/ws/audio"
 
-    # ── Wake word (Porcupine) ─────────────────────────────────────────────────
-    PORCUPINE_ACCESS_KEY: str = ""          # Get free key at picovoice.ai
-    # Built-in keyword: "porcupine", "bumblebee", "hey barista", etc.
-    # Or path to a custom .ppn file
-    WAKE_WORD_KEYWORD: str = "porcupine"
+    # ── Wake word (openWakeWord) ──────────────────────────────────────────────
+    # Built-in model names include: "alexa", "hey mycroft", "hey jarvis", etc.
+    # Set to empty string to disable wake-word gating.
+    WAKE_WORD_KEYWORD: str = "alexa"
+    WAKE_WORD_THRESHOLD: float = 0.5
 
     # ── Audio recording ───────────────────────────────────────────────────────
     SAMPLE_RATE: int = 16000

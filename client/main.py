@@ -66,7 +66,7 @@ def _play_beep(player: AudioPlayer) -> None:
 
 
 async def run() -> None:
-    detector = WakeWordDetector() if settings.PORCUPINE_ACCESS_KEY else None
+    detector = WakeWordDetector() if settings.WAKE_WORD_KEYWORD.strip() else None
     recorder = AudioRecorder()
     player = AudioPlayer()
 
@@ -86,7 +86,7 @@ async def run() -> None:
 
     if detector is None:
         logger.warning(
-            "PORCUPINE_ACCESS_KEY not set — skipping wake word, press Ctrl-C to quit."
+            "WAKE_WORD_KEYWORD is empty — skipping wake word, press Ctrl-C to quit."
         )
 
     # Pre-connect to reduce first-utterance latency
