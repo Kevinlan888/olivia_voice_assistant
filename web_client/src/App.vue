@@ -55,566 +55,198 @@
 </template>
 
 <script setup>
-import { ref, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
+import { log, IS_IOS } from './composables/logger'
+import { useChat } from './composables/useChat'
+import { usePlayback } from './composables/usePlayback'
+import { useRecorder } from './composables/useRecorder'
+import { useConnection } from './composables/useConnection'
 
 /* ── Config ────────────────────────────────────────────────────────────────── */
-const WS_SCHEME         = location.protocol === 'https:' ? 'wss' : 'ws'
-const WS_URL            = `${WS_SCHEME}://${location.host}/ws/audio`
-const TARGET_SR         = 16000
-const SEND_CHUNK        = 8192
-const CONNECT_TIMEOUT   = 8000   // ms before giving up on WS handshake
-const RECONNECT_DELAY   = 2500   // ms before reconnecting after close
-const PING_INTERVAL     = 20000  // ms between keep-alive pings
+const WS_SCHEME = location.protocol === 'https:' ? 'wss' : 'ws'
+const WS_URL    = `${WS_SCHEME}://${location.host}/ws/audio`
+
+log('Page loaded. isIOS=%s UA=%s', IS_IOS, navigator.userAgent)
+log('WS_URL=%s', WS_URL)
+log('visibility=%s', document.visibilityState)
 
 /* ── Reactive UI state ─────────────────────────────────────────────────────── */
 const dotState          = ref('')       // '' | 'ok' | 'rec' | 'think'
 const statusText        = ref('连接中...')
 const micState          = ref('')       // '' | 'rec' | 'think'
-const isRecording       = ref(false)
 const hintText          = ref('按住麦克风说话，松开发送')
 const processStatusText = ref('')
-const messages          = ref([])
-const wsReady           = ref(false)
 
 /* ── Template refs ─────────────────────────────────────────────────────────── */
 const waveCanvasRef = ref(null)
 const chatRef       = ref(null)
 
-/* ── Non-reactive mutable state ────────────────────────────────────────────── */
-let ws             = null
-let recording      = false
-let audioCtx       = null
-let processor         = null
-let audioWorkletNode  = null
-let analyser          = null
-let micStream         = null
-let rawChunks      = []    // Float32Array chunks at native sample rate
-let nativeSR       = TARGET_SR
-let audioChunks    = []
-let statusAudioBuf = []
-let inStatusAudio  = false
-let currentPlayback = null
-let isPlayingAudio  = false
-let streamPlayer    = null
-let holdSource      = null
-let pendingMsgId    = null
-let micPermission   = 'unknown'
-let sharedAudioCtx  = null
-let _rafId          = 0
-let _msgIdCtr       = 0
-let _connectAttempt = 0
-let _connectAt       = 0   // timestamp of last new WebSocket()
-let _pingIntervalId  = null
-let _reconnectTimeoutId = null
+/* ── Composables ───────────────────────────────────────────────────────────── */
+const chat     = useChat(chatRef)
+const playback = usePlayback()
+const recorder = useRecorder(waveCanvasRef, {
+  onMicDenied() {
+    conn.wsReady.value = false
+    hintText.value = '请在浏览器中允许麦克风权限'
+  },
+})
+const conn = useConnection(WS_URL, {
+  onOpen()  {
+    setStatus('ok', '已连接')
+    hintText.value = '按住麦克风说话，松开发送'
+    processStatusText.value = ''
+  },
+  onClose() {
+    setStatus('', '已断开，正在重连...')
+    processStatusText.value = '连接已断开，正在重连...'
+    recorder.cancelRecording()
+    playback.stopPlayback()
+  },
+  onBinary(data) { playback.pushAudioData(data) },
+  onText(msg)    { handleMessage(msg) },
+})
 
-const _isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-               (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+const { messages }   = chat
+const { wsReady }    = conn
+const { isRecording } = recorder
 
-/* ── Logger ────────────────────────────────────────────────────────────────── */
-function log(fmt, ...args) {
-  const t = new Date().toISOString().slice(11, 23) // HH:MM:SS.mmm
-  // vConsole doesn't expand %s/%d — interpolate manually
-  let i = 0
-  const msg = fmt.replace(/%[sd]/g, () => {
-    const v = args[i++]
-    return v === undefined ? '' : v
-  })
-  const rest = args.slice(i)
-  console.log(`[Olivia ${t}] ${msg}`, ...rest)
-}
+/* ── Non-reactive orchestration state ──────────────────────────────────────── */
+let holdSource  = null
+let pendingMsgId = null
 
-log('Page loaded. isIOS=%s UA=%s', _isIOS, navigator.userAgent)
-log('WS_URL=%s', WS_URL)
-log('visibility=%s', document.visibilityState)
-
-/* ── Message helpers ───────────────────────────────────────────────────────── */
-function addMessage(type, text) {
-  const id = ++_msgIdCtr
-  messages.value.push({ id, type, text })
-  nextTick(() => {
-    if (chatRef.value) chatRef.value.scrollTop = chatRef.value.scrollHeight
-  })
-  return id
-}
-
-function updateMessage(id, text) {
-  const m = messages.value.find(m => m.id === id)
-  if (m) m.text = text
-}
-
-function removeMessage(id) {
-  const i = messages.value.findIndex(m => m.id === id)
-  if (i !== -1) messages.value.splice(i, 1)
-}
-
-/* ── UI state helpers ──────────────────────────────────────────────────────── */
+/* ── UI helpers ────────────────────────────────────────────────────────────── */
 function setStatus(state, text) {
-  dotState.value  = state
+  dotState.value   = state
   statusText.value = text
 }
 
-function _idle(hintMsg = '按住麦克风说话，松开发送') {
-  micState.value    = ''
-  isRecording.value = false
+function _idle(hint = '按住麦克风说话，松开发送') {
+  micState.value = ''
   setStatus('ok', '已连接')
-  hintText.value    = hintMsg
+  hintText.value = hint
 }
 
-/* ── Mic permission ────────────────────────────────────────────────────────── */
-function _setMicPermission(state) {
-  micPermission = state
-  if (state === 'denied') {
-    wsReady.value  = false
-    hintText.value = '请在浏览器中允许麦克风权限'
-  }
-}
-
-async function syncMicPermission() {
-  if (!navigator.permissions?.query) return micPermission
+/* ── WS message routing ───────────────────────────────────────────────────── */
+function handleMessage(msg) {
   try {
-    const status = await navigator.permissions.query({ name: 'microphone' })
-    _setMicPermission(status.state)
-    status.onchange = () => _setMicPermission(status.state)
-    return status.state
-  } catch {
-    return micPermission
-  }
-}
-
-async function ensureMicPermission() {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    _setMicPermission('denied')
-    hintText.value = '当前浏览器不支持麦克风'
-    return false
-  }
-
-  const permissionState = await syncMicPermission()
-  if (permissionState === 'granted') return true
-  if (permissionState === 'denied') {
-    _setMicPermission('denied')
-    return false
-  }
-
-  return true
-}
-
-/* ── Audio unlock (iOS) ────────────────────────────────────────────────────── */
-async function unlockAudio() {
-  if (!sharedAudioCtx || sharedAudioCtx.state === 'closed') {
-    sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)()
-  }
-  if (sharedAudioCtx.state === 'suspended') {
-    try { await sharedAudioCtx.resume() } catch {}
-  }
-  try {
-    const buf = sharedAudioCtx.createBuffer(1, 1, 22050)
-    const src = sharedAudioCtx.createBufferSource()
-    src.buffer = buf
-    src.connect(sharedAudioCtx.destination)
-    src.start(0)
-  } catch {}
-}
-
-/* ── Stream player (MediaSource) ───────────────────────────────────────────── */
-function createStreamPlayer() {
-  if (_isIOS) return null
-  if (!window.MediaSource || !MediaSource.isTypeSupported('audio/mpeg')) return null
-
-  const audio = new Audio()
-  audio.autoplay = true
-  audio.playsInline = true
-
-  const mediaSource = new MediaSource()
-  const objectUrl   = URL.createObjectURL(mediaSource)
-  audio.src         = objectUrl
-
-  const state = {
-    audio, mediaSource,
-    sourceBuffer: null,
-    queue: [], open: false, done: false, failed: false, objectUrl,
-  }
-
-  const flush = () => {
-    if (!state.open || !state.sourceBuffer || state.sourceBuffer.updating) return
-    if (state.queue.length > 0) {
-      const chunk = state.queue.shift()
-      try { state.sourceBuffer.appendBuffer(chunk) } catch { state.queue.unshift(chunk) }
-      return
-    }
-    if (state.done && state.mediaSource.readyState === 'open') {
-      try { state.mediaSource.endOfStream() } catch {}
-    }
-  }
-
-  mediaSource.addEventListener('sourceopen', () => {
-    state.open = true
-    try {
-      state.sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg')
-      state.sourceBuffer.mode = 'sequence'
-      state.sourceBuffer.addEventListener('updateend', flush)
-      flush()
-    } catch { state.failed = true }
-  })
-
-  state.push = (ab) => {
-    if (state.failed) return
-    isPlayingAudio = true
-    state.queue.push(ab)
-    flush()
-  }
-
-  state.finish = () => { state.done = true; flush() }
-
-  state.stop = () => {
-    state.done = true; state.queue = []
-    try { audio.pause() } catch {}
-    try { audio.removeAttribute('src'); audio.load() } catch {}
-    try { URL.revokeObjectURL(objectUrl) } catch {}
-    isPlayingAudio = false
-  }
-
-  audio.addEventListener('playing', () => { isPlayingAudio = true })
-  audio.addEventListener('ended', () => {
-    isPlayingAudio = false
-    if (streamPlayer === state) { state.stop(); streamPlayer = null }
-  })
-  audio.addEventListener('pause', () => { if (state.done) isPlayingAudio = false })
-
-  return state
-}
-
-/* ── Playback ──────────────────────────────────────────────────────────────── */
-async function playChunks(chunks) {
-  if (!chunks.length) return
-  const blob = new Blob(chunks, { type: 'audio/mpeg' })
-  const buf  = await blob.arrayBuffer()
-
-  if (!sharedAudioCtx || sharedAudioCtx.state === 'closed') {
-    sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)()
-  }
-  const ctx = sharedAudioCtx
-  if (ctx.state === 'suspended') {
-    try { await ctx.resume() } catch {}
-  }
-
-  try {
-    const decoded = await ctx.decodeAudioData(buf)
-    const src     = ctx.createBufferSource()
-    let resolveEnded = null
-    const ended = new Promise(r => { resolveEnded = r })
-    src.buffer = decoded
-    src.connect(ctx.destination)
-    src.onended = () => { if (resolveEnded) resolveEnded() }
-    currentPlayback = { ctx, src, resolveEnded }
-    isPlayingAudio = true
-    src.start(0)
-    await ended
-  } finally {
-    if (currentPlayback?.ctx === ctx) currentPlayback = null
-    isPlayingAudio = false
-  }
-}
-
-function stopPlayback() {
-  if (streamPlayer) {
-    streamPlayer.stop(); streamPlayer = null; audioChunks = []
-    return true
-  }
-  if (!currentPlayback) return false
-  const { src, resolveEnded } = currentPlayback
-  currentPlayback = null; isPlayingAudio = false
-  try { src.onended = null } catch {}
-  try { src.stop(0) } catch {}
-  try { if (resolveEnded) resolveEnded() } catch {}
-  return true
-}
-
-/* ── WebSocket ─────────────────────────────────────────────────────────────── */
-let _connectTimeoutId = null
-
-function _clearConnectTimeout() {
-  if (_connectTimeoutId !== null) { clearTimeout(_connectTimeoutId); _connectTimeoutId = null }
-}
-
-function connect() {
-  // Avoid stacking multiple pending connections
-  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
-    log('[WS] connect() skipped — already readyState=%s', ws.readyState)
-    return
-  }
-
-  _connectAttempt++
-  _connectAt = performance.now()
-  log('[WS] connect() attempt #%d  visibility=%s  online=%s',
-      _connectAttempt, document.visibilityState, navigator.onLine)
-  ws = new WebSocket(WS_URL)
-  ws.binaryType = 'arraybuffer'
-
-  // Timeout: if still CONNECTING after 8 s, iOS Safari is likely blocking the
-  // WSS handshake due to an untrusted certificate. Force-close and retry.
-  _clearConnectTimeout()
-  _connectTimeoutId = setTimeout(() => {
-    if (ws && ws.readyState === WebSocket.CONNECTING) {
-      log('[WS] TIMEOUT — still CONNECTING after 8 s. Possible cause: ' +
-          'untrusted cert (install mkcert CA on iOS) or network issue. Forcing close.')
-      ws.close()
-    }
-  }, CONNECT_TIMEOUT)
-
-  ws.onopen = () => {
-    _clearConnectTimeout()
-    const elapsed = (performance.now() - _connectAt).toFixed(0)
-    log('[WS] onopen  attempt #%d  elapsed=%sms', _connectAttempt, elapsed)
-    setStatus('ok', '已连接')
-    wsReady.value  = true
-    hintText.value = '按住麦克风说话，松开发送'
-    processStatusText.value = ''
-  }
-
-  ws.onclose = (evt) => {
-    _clearConnectTimeout()
-    log('[WS] onclose  code=%d  reason=%s  wasClean=%s',
-        evt.code, evt.reason || '(none)', evt.wasClean)
-    setStatus('', '已断开，正在重连...')
-    wsReady.value = false
-    processStatusText.value = '连接已断开，正在重连...'
-    _cleanupRecording(false)
-    stopPlayback()
-    _reconnectTimeoutId = setTimeout(connect, RECONNECT_DELAY)
-  }
-
-  ws.onerror = (evt) => {
-    log('[WS] onerror  type=%s  readyState=%s', evt.type, ws.readyState)
-    ws.close()
-  }
-
-  ws.onmessage = async (evt) => { try {
-    if (evt.data instanceof ArrayBuffer) {
-      if (inStatusAudio)                      statusAudioBuf.push(evt.data)
-      else if (streamPlayer && !streamPlayer.failed) streamPlayer.push(evt.data)
-      else                                    audioChunks.push(evt.data)
-      return
-    }
-
-    const msg = evt.data
-
     if (msg === 'DONE') {
-      inStatusAudio = false; statusAudioBuf = []
       _idle(); processStatusText.value = ''
-      if (streamPlayer && !streamPlayer.failed) {
-        streamPlayer.finish()
-      } else {
-        const mp3 = audioChunks.splice(0)
-        if (mp3.length) playChunks(mp3)  // non-blocking — avoid stalling WS handler
-      }
+      playback.finishResponse()
 
     } else if (msg === 'EMPTY') {
       _idle('未检测到语音，请重试')
       processStatusText.value = ''
-      audioChunks = []
-      if (pendingMsgId !== null) { removeMessage(pendingMsgId); pendingMsgId = null }
-      if (streamPlayer) { streamPlayer.stop(); streamPlayer = null }
+      playback.discardBuffers()
+      if (pendingMsgId !== null) { chat.removeMessage(pendingMsgId); pendingMsgId = null }
 
     } else if (msg.startsWith('USER_TEXT:')) {
       const txt = msg.slice(9).trim()
       if (pendingMsgId !== null) {
-        updateMessage(pendingMsgId, txt || '未识别到语音')
+        chat.updateMessage(pendingMsgId, txt || '未识别到语音')
         pendingMsgId = null
       } else if (txt) {
-        addMessage('user', txt)
+        chat.addMessage('user', txt)
       }
 
     } else if (msg.startsWith('ASSISTANT_TEXT:')) {
-      inStatusAudio = false; statusAudioBuf = []
+      playback.resetStatusAudio()
       const txt = msg.slice(15).trim()
-      if (txt) addMessage('assistant', txt)
+      if (txt) chat.addMessage('assistant', txt)
 
     } else if (msg.startsWith('STATUS:')) {
       processStatusText.value = msg.slice(7)
-      inStatusAudio = true; statusAudioBuf = []
+      playback.beginStatusAudio()
 
     } else if (msg === 'STATUS_AUDIO_DONE') {
-      inStatusAudio = false
-      const clips = statusAudioBuf.splice(0)
-      if (clips.length) playChunks(clips)  // non-blocking — avoid stalling WS handler
+      playback.endStatusAudio()
 
     } else if (msg.startsWith('ERROR:')) {
-      inStatusAudio = false; statusAudioBuf = []
+      playback.resetStatusAudio()
       _idle('出错了，请重试')
       processStatusText.value = '处理失败'
-      addMessage('info', '⚠️ ' + msg.slice(6))
-      audioChunks = []
-      if (pendingMsgId !== null) { removeMessage(pendingMsgId); pendingMsgId = null }
-      if (streamPlayer) { streamPlayer.stop(); streamPlayer = null }
+      chat.addMessage('info', '⚠️ ' + msg.slice(6))
+      playback.discardBuffers()
+      if (pendingMsgId !== null) { chat.removeMessage(pendingMsgId); pendingMsgId = null }
     }
     // 'PONG': ignore
   } catch (err) {
-    log('[WS] onmessage error: %s', err)
+    log('[WS] message handler error: %s', err)
     _idle('出错了，请重试')
     processStatusText.value = ''
-    audioChunks = []
-    if (pendingMsgId !== null) { removeMessage(pendingMsgId); pendingMsgId = null }
-    if (streamPlayer) { streamPlayer.stop(); streamPlayer = null }
-  } }
-
-  if (_pingIntervalId === null) {
-    _pingIntervalId = setInterval(() => {
-      if (ws?.readyState === WebSocket.OPEN) ws.send('PING')
-    }, PING_INTERVAL)
-  }
-}
-
-/* ── Microphone ────────────────────────────────────────────────────────────── */
-async function startRecording() {
-  if (recording) return
-  const granted = await ensureMicPermission()
-  if (!granted) return
-
-  if (streamPlayer) { streamPlayer.stop(); streamPlayer = null }
-
-  try {
-    micStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount:     1,
-        sampleRate:       TARGET_SR,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl:  true,
-      },
-    })
-    _setMicPermission('granted')
-  } catch (e) {
-    _setMicPermission('denied')
-    hintText.value = '无法访问麦克风：' + e.message
-    return
-  }
-
-  // Create AudioContext at the device's native sample rate.
-  // iOS Safari ignores a forced sampleRate, so we always capture at native
-  // rate and resample offline on stop via OfflineAudioContext (much higher
-  // quality than manual linear interpolation).
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)()
-  nativeSR = audioCtx.sampleRate
-  log('[Rec] AudioContext sampleRate=%d', nativeSR)
-  const source   = audioCtx.createMediaStreamSource(micStream)
-
-  analyser = audioCtx.createAnalyser()
-  analyser.fftSize = 256
-  source.connect(analyser)
-
-  rawChunks = []
-
-  // Prefer AudioWorklet (runs on audio thread → no main-thread dropouts).
-  // Fall back to the deprecated ScriptProcessor for very old browsers.
-  let usedWorklet = false
-  if (audioCtx.audioWorklet) {
-    try {
-      const workletCode = `
-class RecorderProcessor extends AudioWorkletProcessor {
-  process(inputs) {
-    const ch = inputs[0]?.[0]
-    if (ch && ch.length > 0) this.port.postMessage(ch.slice())
-    return true
-  }
-}
-registerProcessor('recorder-processor', RecorderProcessor)`
-      const blob = new Blob([workletCode], { type: 'application/javascript' })
-      const url  = URL.createObjectURL(blob)
-      await audioCtx.audioWorklet.addModule(url)
-      URL.revokeObjectURL(url)
-      audioWorkletNode = new AudioWorkletNode(audioCtx, 'recorder-processor')
-      audioWorkletNode.port.onmessage = (e) => {
-        if (recording) rawChunks.push(new Float32Array(e.data))
-      }
-      analyser.connect(audioWorkletNode)
-      audioWorkletNode.connect(audioCtx.destination)
-      usedWorklet = true
-      log('[Rec] Using AudioWorklet')
-    } catch (err) {
-      log('[Rec] AudioWorklet init failed, falling back to ScriptProcessor: %s', err)
-      if (audioWorkletNode) { try { audioWorkletNode.disconnect() } catch {} audioWorkletNode = null }
-    }
-  }
-
-  if (!usedWorklet) {
-    processor = audioCtx.createScriptProcessor(4096, 1, 1)
-    processor.onaudioprocess = (e) => {
-      if (!recording) return
-      rawChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)))
-    }
-    analyser.connect(processor)
-    processor.connect(audioCtx.destination)
-    log('[Rec] Using ScriptProcessor (fallback)')
-  }
-
-  recording         = true
-  isRecording.value = true
-  audioChunks       = []
-  processStatusText.value = ''
-  micState.value    = 'rec'
-  setStatus('rec', '录音中...')
-  hintText.value    = '松开发送'
-  pendingMsgId      = addMessage('user', '正在听你说...')
-  drawWave()
-}
-
-function stopRecording() {
-  if (!recording) return
-  recording = false
-  _cleanupRecording(true)
-}
-
-function _cleanupRecording(sendEnd) {
-  cancelAnimationFrame(_rafId)
-  isRecording.value = false
-  if (audioWorkletNode) { audioWorkletNode.disconnect(); audioWorkletNode = null }
-  if (processor)        { processor.disconnect();        processor         = null }
-  if (analyser)         { analyser.disconnect();         analyser          = null }
-  if (audioCtx)  { audioCtx.close();       audioCtx  = null }
-  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null }
-
-  if (sendEnd && ws?.readyState === WebSocket.OPEN) {
-    audioChunks = []
-    if (streamPlayer) streamPlayer.stop()
-    streamPlayer = createStreamPlayer()
-    micState.value = 'think'
-    setStatus('think', 'AI 思考中...')
-    hintText.value          = '正在处理...'
-    processStatusText.value = '正在处理...'
-    const chunks = rawChunks.splice(0)
-    const sr     = nativeSR
-    _resampleAndSend(chunks, sr)  // async, fire-and-forget
-  } else {
-    rawChunks = []
+    playback.discardBuffers()
+    if (pendingMsgId !== null) { chat.removeMessage(pendingMsgId); pendingMsgId = null }
   }
 }
 
 /* ── Press-to-talk ─────────────────────────────────────────────────────────── */
 async function beginPressToTalk(source) {
-  if (holdSource || recording) return
+  if (holdSource || recorder.isActive) return
   holdSource = source
 
-  await unlockAudio()
+  await playback.unlockAudio()
 
-  if (isPlayingAudio) stopPlayback()
+  if (playback.isPlaying()) playback.stopPlayback()
 
-  if (ws?.readyState !== WebSocket.OPEN) {
+  if (!conn.isOpen()) {
     holdSource = null
     hintText.value = '连接未就绪，请稍后'
     return
   }
 
-  await startRecording()
+  const perm = await recorder.ensureMicPermission()
+  if (!perm.granted) {
+    holdSource = null
+    if (perm.hint) hintText.value = perm.hint
+    return
+  }
 
-  if (!recording) { holdSource = null; return }
+  playback.stopPlayback()
 
-  if (holdSource !== source) stopRecording()
+  const result = await recorder.startRecording()
+  if (result && result.error) {
+    holdSource = null
+    hintText.value = result.error
+    return
+  }
+  if (!recorder.isActive) { holdSource = null; return }
+
+  // UI: recording started
+  processStatusText.value = ''
+  micState.value    = 'rec'
+  setStatus('rec', '录音中...')
+  hintText.value    = '松开发送'
+  pendingMsgId      = chat.addMessage('user', '正在听你说...')
+
+  if (holdSource !== source) finishRecording()
 }
 
 function endPressToTalk(source) {
   if (holdSource !== source) return
   holdSource = null
-  if (recording) stopRecording()
+  if (recorder.isActive) finishRecording()
+}
+
+function finishRecording() {
+  const data = recorder.stopRecording()
+
+  if (!data || !conn.isOpen()) return
+
+  // UI: transition to thinking
+  playback.prepareForResponse()
+  micState.value = 'think'
+  setStatus('think', 'AI 思考中...')
+  hintText.value          = '正在处理...'
+  processStatusText.value = '正在处理...'
+
+  // Resample and send (fire-and-forget)
+  recorder.resampleAndSend(data.chunks, data.sampleRate, (buf) => {
+    conn.send(buf)
+  }).catch(() => {
+    _idle('处理录音失败，请重试')
+    processStatusText.value = ''
+    if (pendingMsgId !== null) { chat.removeMessage(pendingMsgId); pendingMsgId = null }
+    playback.discardBuffers()
+  })
 }
 
 /* ── Button event handlers ─────────────────────────────────────────────────── */
@@ -652,158 +284,31 @@ function onWindowBlur() {
   if (holdSource) endPressToTalk(holdSource)
 }
 
-/* ── Waveform ──────────────────────────────────────────────────────────────── */
-function drawWave() {
-  if (!analyser || !waveCanvasRef.value) return
-  _rafId = requestAnimationFrame(drawWave)
-
-  const canvas = waveCanvasRef.value
-  const wCtx   = canvas.getContext('2d')
-  const W = canvas.width, H = canvas.height
-  const data = new Uint8Array(analyser.frequencyBinCount)
-  analyser.getByteTimeDomainData(data)
-
-  wCtx.clearRect(0, 0, W, H)
-  const cx = W / 2, cy = H / 2, r = W / 2 - 14
-  const step = (2 * Math.PI) / data.length
-
-  wCtx.beginPath()
-  for (let i = 0; i < data.length; i++) {
-    const amp   = ((data[i] / 128) - 1) * 16
-    const angle = i * step - Math.PI / 2
-    const x = cx + (r + amp) * Math.cos(angle)
-    const y = cy + (r + amp) * Math.sin(angle)
-    i === 0 ? wCtx.moveTo(x, y) : wCtx.lineTo(x, y)
-  }
-  wCtx.closePath()
-  wCtx.strokeStyle = 'rgba(124,111,247,0.65)'
-  wCtx.lineWidth   = 2
-  wCtx.stroke()
-}
-
-/* ── DSP helpers ───────────────────────────────────────────────────────────── */
-function f32ToI16(buf) {
-  const out = new Int16Array(buf.length)
-  for (let i = 0; i < buf.length; i++)
-    out[i] = Math.max(-32768, Math.min(32767, buf[i] * 32767))
-  return out
-}
-
-// Resample & send via OfflineAudioContext, then fire END.
-// Called after the user releases the mic button.
-async function _resampleAndSend(chunks, fromSR) {
-  if (!chunks.length) { if (ws?.readyState === WebSocket.OPEN) ws.send('END'); return }
-
-  try {
-    // Concatenate all captured Float32 chunks
-    const totalLen = chunks.reduce((s, c) => s + c.length, 0)
-    const merged   = new Float32Array(totalLen)
-    let off = 0
-    for (const c of chunks) { merged.set(c, off); off += c.length }
-
-    // Resample to 16 kHz using the browser's built-in resampler.
-    // OfflineAudioContext handles the anti-aliasing correctly; simple linear
-    // interpolation (the old approach) caused audible distortion on iOS.
-    let resampled
-    if (fromSR === TARGET_SR) {
-      resampled = merged
-    } else {
-      const outLen = Math.ceil(totalLen * TARGET_SR / fromSR)
-      const offCtx = new OfflineAudioContext(1, outLen, TARGET_SR)
-      const buf    = offCtx.createBuffer(1, totalLen, fromSR)
-      buf.getChannelData(0).set(merged)
-      const src = offCtx.createBufferSource()
-      src.buffer = buf
-      src.connect(offCtx.destination)
-      src.start(0)
-      const rendered = await offCtx.startRendering()
-      resampled = rendered.getChannelData(0)
-    }
-    log('[Rec] resampled %d → %d samples (%dHz → %dHz)', totalLen, resampled.length, fromSR, TARGET_SR)
-
-    // Convert to Int16 and send in chunks
-    const i16       = f32ToI16(resampled)
-    const chunkSize = SEND_CHUNK >> 1   // samples per chunk
-    for (let i = 0; i < i16.length; i += chunkSize) {
-      if (ws?.readyState !== WebSocket.OPEN) return
-      ws.send(i16.slice(i, i + chunkSize).buffer)
-    }
-    if (ws?.readyState === WebSocket.OPEN) ws.send('END')
-  } catch (err) {
-    log('[Rec] _resampleAndSend error: %s', err)
-    _idle('处理录音失败，请重试')
-    processStatusText.value = ''
-    if (pendingMsgId !== null) { removeMessage(pendingMsgId); pendingMsgId = null }
-    if (streamPlayer) { streamPlayer.stop(); streamPlayer = null }
-  }
-}
-
-/* ── Visibility / background handling ────────────────────────────────────── */
-function onVisibilityChange() {
-  log('[Page] visibilitychange → %s  wsReadyState=%s',
-      document.visibilityState, ws ? ws.readyState : 'no-ws')
-
-  if (document.visibilityState === 'visible') {
-    // iOS may silently kill the WS while backgrounded; force reconnect if needed
-    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-      log('[Page] visible — WS dead, reconnecting immediately')
-      connect()
-    } else if (ws.readyState === WebSocket.OPEN) {
-      // Send a PING to verify the connection is actually alive
-      log('[Page] visible — WS appears open, sending PING to verify')
-      try { ws.send('PING') } catch (e) { log('[Page] PING failed: %s', e); ws.close() }
-    }
-  } else {
-    log('[Page] hidden — WS will likely be frozen/killed by iOS')
-  }
-}
-
-function onPageShow(evt) {
-  log('[Page] pageshow  persisted=%s (bfcache=%s)  wsReadyState=%s',
-      evt.persisted, evt.persisted ? 'YES — restored from cache' : 'no',
-      ws ? ws.readyState : 'no-ws')
-  // bfcache restore on iOS: page looks alive but WS is dead
-  if (evt.persisted && ws && ws.readyState !== WebSocket.OPEN) {
-    log('[Page] bfcache restore + dead WS, reconnecting')
-    connect()
-  }
-}
-
-function onPageHide(evt) {
-  log('[Page] pagehide  persisted=%s', evt.persisted)
-}
-
-function onOnline()  { log('[Net] online') }
-function onOffline() { log('[Net] offline') }
-
 /* ── Lifecycle ─────────────────────────────────────────────────────────────── */
 onMounted(() => {
-  connect()
-  syncMicPermission()
-  window.addEventListener('keydown',          onKeyDown)
-  window.addEventListener('keyup',            onKeyUp)
-  window.addEventListener('blur',             onWindowBlur)
-  document.addEventListener('visibilitychange', onVisibilityChange)
-  window.addEventListener('pageshow',         onPageShow)
-  window.addEventListener('pagehide',         onPageHide)
-  window.addEventListener('online',           onOnline)
-  window.addEventListener('offline',          onOffline)
+  conn.connect()
+  recorder.syncMicPermission()
+  window.addEventListener('keydown',            onKeyDown)
+  window.addEventListener('keyup',              onKeyUp)
+  window.addEventListener('blur',               onWindowBlur)
+  document.addEventListener('visibilitychange', conn.onVisibilityChange)
+  window.addEventListener('pageshow',           conn.onPageShow)
+  window.addEventListener('pagehide',           conn.onPageHide)
+  window.addEventListener('online',             conn.onOnline)
+  window.addEventListener('offline',            conn.onOffline)
 })
 
 onUnmounted(() => {
-  if (_reconnectTimeoutId !== null) { clearTimeout(_reconnectTimeoutId); _reconnectTimeoutId = null }
-  if (ws) ws.close()
-  if (_pingIntervalId !== null) { clearInterval(_pingIntervalId); _pingIntervalId = null }
-  window.removeEventListener('keydown',          onKeyDown)
-  window.removeEventListener('keyup',            onKeyUp)
-  window.removeEventListener('blur',             onWindowBlur)
-  document.removeEventListener('visibilitychange', onVisibilityChange)
-  window.removeEventListener('pageshow',         onPageShow)
-  window.removeEventListener('pagehide',         onPageHide)
-  window.removeEventListener('online',           onOnline)
-  window.removeEventListener('offline',          onOffline)
-  cancelAnimationFrame(_rafId)
-  if (sharedAudioCtx) { try { sharedAudioCtx.close() } catch {} }
+  conn.destroy()
+  playback.destroy()
+  window.removeEventListener('keydown',            onKeyDown)
+  window.removeEventListener('keyup',              onKeyUp)
+  window.removeEventListener('blur',               onWindowBlur)
+  document.removeEventListener('visibilitychange', conn.onVisibilityChange)
+  window.removeEventListener('pageshow',           conn.onPageShow)
+  window.removeEventListener('pagehide',           conn.onPageHide)
+  window.removeEventListener('online',             conn.onOnline)
+  window.removeEventListener('offline',            conn.onOffline)
 })
 </script>
 
