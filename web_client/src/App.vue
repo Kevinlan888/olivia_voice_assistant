@@ -58,10 +58,13 @@
 import { ref, nextTick, onMounted, onUnmounted } from 'vue'
 
 /* ── Config ────────────────────────────────────────────────────────────────── */
-const WS_SCHEME  = location.protocol === 'https:' ? 'wss' : 'ws'
-const WS_URL     = `${WS_SCHEME}://${location.host}/ws/audio`
-const TARGET_SR  = 16000
-const SEND_CHUNK = 8192
+const WS_SCHEME         = location.protocol === 'https:' ? 'wss' : 'ws'
+const WS_URL            = `${WS_SCHEME}://${location.host}/ws/audio`
+const TARGET_SR         = 16000
+const SEND_CHUNK        = 8192
+const CONNECT_TIMEOUT   = 8000   // ms before giving up on WS handshake
+const RECONNECT_DELAY   = 2500   // ms before reconnecting after close
+const PING_INTERVAL     = 20000  // ms between keep-alive pings
 
 /* ── Reactive UI state ─────────────────────────────────────────────────────── */
 const dotState          = ref('')       // '' | 'ok' | 'rec' | 'think'
@@ -100,8 +103,9 @@ let sharedAudioCtx  = null
 let _rafId          = 0
 let _msgIdCtr       = 0
 let _connectAttempt = 0
-let _connectAt      = 0   // timestamp of last new WebSocket()
-let _pingIntervalId = null
+let _connectAt       = 0   // timestamp of last new WebSocket()
+let _pingIntervalId  = null
+let _reconnectTimeoutId = null
 
 const _isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
@@ -355,7 +359,7 @@ function connect() {
           'untrusted cert (install mkcert CA on iOS) or network issue. Forcing close.')
       ws.close()
     }
-  }, 8000)
+  }, CONNECT_TIMEOUT)
 
   ws.onopen = () => {
     _clearConnectTimeout()
@@ -376,7 +380,7 @@ function connect() {
     processStatusText.value = '连接已断开，正在重连...'
     _cleanupRecording(false)
     stopPlayback()
-    setTimeout(connect, 2500)
+    _reconnectTimeoutId = setTimeout(connect, RECONNECT_DELAY)
   }
 
   ws.onerror = (evt) => {
@@ -401,7 +405,7 @@ function connect() {
         streamPlayer.finish()
       } else {
         const mp3 = audioChunks.splice(0)
-        if (mp3.length) await playChunks(mp3)
+        if (mp3.length) playChunks(mp3)  // non-blocking — avoid stalling WS handler
       }
 
     } else if (msg === 'EMPTY') {
@@ -412,7 +416,7 @@ function connect() {
       if (streamPlayer) { streamPlayer.stop(); streamPlayer = null }
 
     } else if (msg.startsWith('USER_TEXT:')) {
-      const txt = msg.slice(10).trim()
+      const txt = msg.slice(9).trim()
       if (pendingMsgId !== null) {
         updateMessage(pendingMsgId, txt || '未识别到语音')
         pendingMsgId = null
@@ -432,7 +436,7 @@ function connect() {
     } else if (msg === 'STATUS_AUDIO_DONE') {
       inStatusAudio = false
       const clips = statusAudioBuf.splice(0)
-      if (clips.length) await playChunks(clips)
+      if (clips.length) playChunks(clips)  // non-blocking — avoid stalling WS handler
 
     } else if (msg.startsWith('ERROR:')) {
       inStatusAudio = false; statusAudioBuf = []
@@ -456,7 +460,7 @@ function connect() {
   if (_pingIntervalId === null) {
     _pingIntervalId = setInterval(() => {
       if (ws?.readyState === WebSocket.OPEN) ws.send('PING')
-    }, 20000)
+    }, PING_INTERVAL)
   }
 }
 
@@ -590,7 +594,7 @@ async function beginPressToTalk(source) {
   if (holdSource || recording) return
   holdSource = source
 
-  unlockAudio()
+  await unlockAudio()
 
   if (isPlayingAudio) stopPlayback()
 
@@ -690,40 +694,48 @@ function f32ToI16(buf) {
 async function _resampleAndSend(chunks, fromSR) {
   if (!chunks.length) { if (ws?.readyState === WebSocket.OPEN) ws.send('END'); return }
 
-  // Concatenate all captured Float32 chunks
-  const totalLen = chunks.reduce((s, c) => s + c.length, 0)
-  const merged   = new Float32Array(totalLen)
-  let off = 0
-  for (const c of chunks) { merged.set(c, off); off += c.length }
+  try {
+    // Concatenate all captured Float32 chunks
+    const totalLen = chunks.reduce((s, c) => s + c.length, 0)
+    const merged   = new Float32Array(totalLen)
+    let off = 0
+    for (const c of chunks) { merged.set(c, off); off += c.length }
 
-  // Resample to 16 kHz using the browser's built-in resampler.
-  // OfflineAudioContext handles the anti-aliasing correctly; simple linear
-  // interpolation (the old approach) caused audible distortion on iOS.
-  let resampled
-  if (fromSR === TARGET_SR) {
-    resampled = merged
-  } else {
-    const outLen = Math.ceil(totalLen * TARGET_SR / fromSR)
-    const offCtx = new OfflineAudioContext(1, outLen, TARGET_SR)
-    const buf    = offCtx.createBuffer(1, totalLen, fromSR)
-    buf.getChannelData(0).set(merged)
-    const src = offCtx.createBufferSource()
-    src.buffer = buf
-    src.connect(offCtx.destination)
-    src.start(0)
-    const rendered = await offCtx.startRendering()
-    resampled = rendered.getChannelData(0)
-  }
-  log('[Rec] resampled %d → %d samples (%dHz → %dHz)', totalLen, resampled.length, fromSR, TARGET_SR)
+    // Resample to 16 kHz using the browser's built-in resampler.
+    // OfflineAudioContext handles the anti-aliasing correctly; simple linear
+    // interpolation (the old approach) caused audible distortion on iOS.
+    let resampled
+    if (fromSR === TARGET_SR) {
+      resampled = merged
+    } else {
+      const outLen = Math.ceil(totalLen * TARGET_SR / fromSR)
+      const offCtx = new OfflineAudioContext(1, outLen, TARGET_SR)
+      const buf    = offCtx.createBuffer(1, totalLen, fromSR)
+      buf.getChannelData(0).set(merged)
+      const src = offCtx.createBufferSource()
+      src.buffer = buf
+      src.connect(offCtx.destination)
+      src.start(0)
+      const rendered = await offCtx.startRendering()
+      resampled = rendered.getChannelData(0)
+    }
+    log('[Rec] resampled %d → %d samples (%dHz → %dHz)', totalLen, resampled.length, fromSR, TARGET_SR)
 
-  // Convert to Int16 and send in chunks
-  const i16       = f32ToI16(resampled)
-  const chunkSize = SEND_CHUNK >> 1   // samples per chunk
-  for (let i = 0; i < i16.length; i += chunkSize) {
-    if (ws?.readyState !== WebSocket.OPEN) return
-    ws.send(i16.slice(i, i + chunkSize).buffer)
+    // Convert to Int16 and send in chunks
+    const i16       = f32ToI16(resampled)
+    const chunkSize = SEND_CHUNK >> 1   // samples per chunk
+    for (let i = 0; i < i16.length; i += chunkSize) {
+      if (ws?.readyState !== WebSocket.OPEN) return
+      ws.send(i16.slice(i, i + chunkSize).buffer)
+    }
+    if (ws?.readyState === WebSocket.OPEN) ws.send('END')
+  } catch (err) {
+    log('[Rec] _resampleAndSend error: %s', err)
+    _idle('处理录音失败，请重试')
+    processStatusText.value = ''
+    if (pendingMsgId !== null) { removeMessage(pendingMsgId); pendingMsgId = null }
+    if (streamPlayer) { streamPlayer.stop(); streamPlayer = null }
   }
-  if (ws?.readyState === WebSocket.OPEN) ws.send('END')
 }
 
 /* ── Visibility / background handling ────────────────────────────────────── */
@@ -779,6 +791,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  if (_reconnectTimeoutId !== null) { clearTimeout(_reconnectTimeoutId); _reconnectTimeoutId = null }
   if (ws) ws.close()
   if (_pingIntervalId !== null) { clearInterval(_pingIntervalId); _pingIntervalId = null }
   window.removeEventListener('keydown',          onKeyDown)
