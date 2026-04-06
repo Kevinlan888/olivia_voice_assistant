@@ -13,6 +13,7 @@ Requires a free Picovoice access key — set PICOVOICE_ACCESS_KEY in .env.
 import logging
 import time
 import struct
+import threading
 import pvporcupine
 import pyaudio
 
@@ -63,6 +64,7 @@ class WakeWordDetector:
         self._frame_length = self._porcupine.frame_length    # always 512
 
         self._stream = None
+        self._stop_event = threading.Event()
         self._open_stream()
         logger.info(
             "Wake word detector ready (Porcupine): keyword='%s', sensitivity=%.2f, cooldown=%.1fs",
@@ -104,7 +106,7 @@ class WakeWordDetector:
             logger.debug("Discarded %d stale frames", frames_to_discard)
 
         logger.info("Listening for wake word …")
-        while True:
+        while not self._stop_event.is_set():
             pcm_bytes = self._stream.read(self._frame_length, exception_on_overflow=False)
             # Porcupine expects a list/tuple of int16 samples
             pcm = struct.unpack_from(f"{self._frame_length}h", pcm_bytes)
@@ -120,7 +122,12 @@ class WakeWordDetector:
                 self._close_stream()
                 return
 
+    def stop(self) -> None:
+        """Signal the wake-word loop to exit (thread-safe)."""
+        self._stop_event.set()
+
     def close(self) -> None:
+        self._stop_event.set()
         self._close_stream()
         if self._porcupine is not None:
             self._porcupine.delete()

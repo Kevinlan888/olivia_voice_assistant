@@ -126,9 +126,15 @@ async def run() -> None:
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     signal_handlers_registered = False
+
+    def _on_signal():
+        stop_event.set()
+        if detector:
+            detector.stop()
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, stop_event.set)
+            loop.add_signal_handler(sig, _on_signal)
             signal_handlers_registered = True
         except (NotImplementedError, RuntimeError):
             # RuntimeError can occur in non-main-thread contexts.
@@ -146,6 +152,9 @@ async def run() -> None:
             else:
                 if detector:
                     await asyncio.to_thread(detector.wait_for_wake_word)
+
+                if stop_event.is_set():
+                    break
 
                 # ── Step 2: Pre-open mic, then play acknowledgement beep ──────
                 # Pre-opening before the beep lets PyAudio start buffering audio
