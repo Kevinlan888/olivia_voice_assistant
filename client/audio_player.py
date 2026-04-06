@@ -48,7 +48,11 @@ class AudioPlayer:
         logger.info("AudioPlayer ready (miniaudio decoder + pyaudio output)")
 
     def play(self, mp3_bytes: bytes) -> None:
-        """Decode MP3 and play synchronously via PyAudio (blocks until done)."""
+        """Decode MP3 and play synchronously via PyAudio (blocks until done).
+
+        MUST NOT be called while a stream worker is active — it would kill
+        the worker's PyAudio instance.  Use play_or_feed() for safe dispatch.
+        """
         with self._lock:
             pcm = _decode_mp3(mp3_bytes)
             pa = manager.fresh_pa()
@@ -63,6 +67,23 @@ class AudioPlayer:
             finally:
                 stream.stop_stream()
                 stream.close()
+
+    @property
+    def is_streaming(self) -> bool:
+        """True while a background stream worker is active."""
+        return self._stream_thread is not None and self._stream_thread.is_alive()
+
+    def play_or_feed(self, mp3_bytes: bytes) -> None:
+        """Play audio safely regardless of mode.
+
+        If a stream worker is running, feed the bytes into it so they play
+        seamlessly without killing the worker's PyAudio instance.
+        Otherwise, fall back to the blocking play() path.
+        """
+        if self.is_streaming:
+            self.feed_stream_chunk(mp3_bytes)
+        else:
+            self.play(mp3_bytes)
 
     def stop(self) -> None:
         self._stream_stop.set()

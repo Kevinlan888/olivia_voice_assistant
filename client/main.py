@@ -95,8 +95,12 @@ async def run() -> None:
         logger.info("⏳ %s", msg)
 
     async def on_status_audio(mp3_bytes: bytes) -> None:
-        """Play the server-synthesised status audio clip immediately."""
-        await asyncio.to_thread(player.play, mp3_bytes)
+        """Play the server-synthesised status audio clip immediately.
+
+        If stream playback is active, feed into the existing stream so we
+        don't kill the worker's PyAudio instance.
+        """
+        await asyncio.to_thread(player.play_or_feed, mp3_bytes)
 
     async def on_audio_chunk(mp3_chunk: bytes) -> None:
         """Queue assistant audio chunk for progressive playback."""
