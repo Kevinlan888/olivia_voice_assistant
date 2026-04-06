@@ -22,9 +22,10 @@ class ClientSettings(BaseSettings):
     SAMPLE_RATE: int = 16000
     CHANNELS: int = 1
     CHUNK_FRAMES: int = 512             # frames per PyAudio buffer read
-    # Silence detection
-    SILENCE_THRESHOLD: float = 300.0    # RMS energy below this = silence
-    SILENCE_SECONDS: float = 1.5        # silence duration before stopping recording
+    # Silence detection (adaptive noise gate)
+    SILENCE_CALIBRATION_FRAMES: int = 10  # frames to sample noise floor at start
+    SILENCE_SPEECH_MULTIPLIER: float = 1.5  # RMS > noise_floor * multiplier = speech
+    SILENCE_SECONDS: float = 0.8        # silence duration before stopping recording
     MAX_RECORDING_SECONDS: float = 15.0 # hard cap per utterance
 
     # ── Push-to-talk button (Raspberry Pi GPIO) ───────────────────────────────

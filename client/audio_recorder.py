@@ -36,13 +36,14 @@ class AudioRecorder:
     def __init__(self):
         self._rate = settings.SAMPLE_RATE
         self._chunk = settings.CHUNK_FRAMES
-        self._silence_threshold = settings.SILENCE_THRESHOLD
+        self._calibration_frames = max(3, settings.SILENCE_CALIBRATION_FRAMES)
+        self._speech_multiplier = max(1.1, settings.SILENCE_SPEECH_MULTIPLIER)
         self._silence_limit = int(settings.SILENCE_SECONDS * self._rate / self._chunk)
         self._max_chunks = int(settings.MAX_RECORDING_SECONDS * self._rate / self._chunk)
         self._pre_stream = None
         logger.info(
-            "AudioRecorder ready: rate=%d silence_threshold=%.0f",
-            self._rate, self._silence_threshold,
+            "AudioRecorder ready: rate=%d calibration_frames=%d speech_mult=%.1f",
+            self._rate, self._calibration_frames, self._speech_multiplier,
         )
 
     def pre_open_stream(self) -> None:
@@ -91,9 +92,25 @@ class AudioRecorder:
 
         logger.info("Recording … (speak now)")
 
-        frames: list[bytes] = []
+        # ── Adaptive noise floor calibration ───────────────────────────────────
+        # Read a few frames of ambient noise to set the threshold dynamically.
+        # This eliminates per-environment manual tuning.
+        cal_rms_values = []
+        cal_frames: list[bytes] = []
+        for _ in range(self._calibration_frames):
+            chunk = stream.read(self._chunk, exception_on_overflow=False)
+            cal_frames.append(chunk)
+            cal_rms_values.append(_rms(chunk))
+
+        noise_floor = float(np.median(cal_rms_values))
+        # Clamp noise floor to a sane minimum so dead-silent rooms still work.
+        noise_floor = max(noise_floor, 50.0)
+        threshold = noise_floor * self._speech_multiplier
+        logger.info("Noise floor=%.0f → speech threshold=%.0f", noise_floor, threshold)
+
+        frames: list[bytes] = list(cal_frames)   # keep calibration frames (may contain speech)
         silent_chunks = 0
-        total_chunks = 0
+        total_chunks = len(cal_frames)
         speech_detected = False
 
         try:
@@ -104,22 +121,16 @@ class AudioRecorder:
 
                 rms = _rms(chunk)
 
-                if _rms(chunk) < self._silence_threshold:
+                if rms < threshold:
                     silent_chunks += 1
                 else:
-                    silent_chunks = 0  # reset on speech
+                    silent_chunks = 0
                     speech_detected = True
-
-                if total_chunks <= 5 or total_chunks % 50 == 0:
-                    logger.info("chunk=%d rms=%.0f silent_chunks=%d speech=%s",
-                                 total_chunks, rms, silent_chunks, speech_detected)
 
                 # Stop on sustained silence — but only after speech was detected,
                 # so we don't bail on the brief quiet before the user starts talking.
                 if speech_detected and silent_chunks >= self._silence_limit:
                     logger.info("Silence detected — stopping recording.")
-                    # Trim trailing silent frames so the server doesn't receive
-                    # seconds of dead air after the utterance.
                     if silent_chunks <= len(frames):
                         frames = frames[: len(frames) - silent_chunks]
                     break
