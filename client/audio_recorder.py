@@ -94,6 +94,7 @@ class AudioRecorder:
         frames: list[bytes] = []
         silent_chunks = 0
         total_chunks = 0
+        speech_detected = False
 
         try:
             while total_chunks < self._max_chunks:
@@ -101,13 +102,26 @@ class AudioRecorder:
                 frames.append(chunk)
                 total_chunks += 1
 
+                rms = _rms(chunk)
+
                 if _rms(chunk) < self._silence_threshold:
                     silent_chunks += 1
                 else:
                     silent_chunks = 0  # reset on speech
+                    speech_detected = True
 
-                if silent_chunks >= self._silence_limit and total_chunks > self._silence_limit:
+                if total_chunks <= 5 or total_chunks % 50 == 0:
+                    logger.info("chunk=%d rms=%.0f silent_chunks=%d speech=%s",
+                                 total_chunks, rms, silent_chunks, speech_detected)
+
+                # Stop on sustained silence — but only after speech was detected,
+                # so we don't bail on the brief quiet before the user starts talking.
+                if speech_detected and silent_chunks >= self._silence_limit:
                     logger.info("Silence detected — stopping recording.")
+                    # Trim trailing silent frames so the server doesn't receive
+                    # seconds of dead air after the utterance.
+                    if silent_chunks <= len(frames):
+                        frames = frames[: len(frames) - silent_chunks]
                     break
         finally:
             stream.stop_stream()
