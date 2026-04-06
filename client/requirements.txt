@@ -1,9 +1,9 @@
 # Olivia Client Dependencies
 # Install system packages first (Debian/Raspberry Pi OS):
-#   sudo apt install portaudio19-dev libmpg123-dev python3-dev
+#   sudo apt install portaudio19-dev python3-dev
 pydantic-settings>=2.2.0
 pyaudio>=0.2.14
 openwakeword>=0.6.0    # offline wake-word detection (default model: alexa)
 websockets>=12.0
-pygame>=2.5.2          # audio playback (MP3 + WAV)
+miniaudio>=1.55        # MP3 decoding (no audio device, no system deps)
 numpy>=1.24.0

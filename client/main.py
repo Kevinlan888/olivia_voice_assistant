@@ -17,6 +17,7 @@ import signal
 import sys
 
 from .config import settings
+from .audio_manager import manager
 from .wake_word import WakeWordDetector
 from .audio_recorder import AudioRecorder
 from .audio_player import AudioPlayer
@@ -30,15 +31,16 @@ logger = logging.getLogger(__name__)
 
 
 def _play_beep(player: AudioPlayer) -> None:
-    """Play a short 440 Hz MP3 beep to signal readiness.
-    
-    Generates a minimal WAV in memory using the standard library — no
-    external audio asset required.
+    """Play a short 880 Hz beep to signal readiness via PyAudio (no pygame needed).
+
+    Generates a minimal WAV in memory using the standard library, decodes
+    the raw PCM samples, and writes them directly to a PyAudio output stream.
     """
     import math
     import struct
-    import io
     import wave
+    import io
+    import pyaudio
 
     sample_rate = 22050
     duration = 0.15  # seconds
@@ -48,21 +50,20 @@ def _play_beep(player: AudioPlayer) -> None:
         int(32767 * math.sin(2 * math.pi * freq * i / sample_rate))
         for i in range(num_samples)
     ]
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(struct.pack(f"{num_samples}h", *samples))
-    wav_bytes = buf.getvalue()
+    raw_pcm = struct.pack(f"{num_samples}h", *samples)
 
-    # pygame can play WAV bytes too
-    import pygame
-    buf.seek(0)
-    sound = pygame.mixer.Sound(buf)
-    sound.play()
-    import time
-    time.sleep(duration + 0.05)
+    pa = manager.fresh_pa()
+    stream = pa.open(
+        format=pyaudio.paInt16,
+        channels=1,
+        rate=sample_rate,
+        output=True,
+    )
+    try:
+        stream.write(raw_pcm)
+    finally:
+        stream.stop_stream()
+        stream.close()
 
 
 async def run() -> None:
@@ -72,7 +73,7 @@ async def run() -> None:
 
     # ── Status callbacks ──────────────────────────────────────────────────────
     # Called when the server starts executing a tool (before TTS is ready).
-    # Using asyncio.to_thread so the blocking pygame.play() doesn't stall the loop.
+    # Using asyncio.to_thread so the blocking player.play() doesn't stall the loop.
 
     async def on_status(msg: str) -> None:
         """Log the status text (extend this to flash an LED, update a display, etc.)"""
@@ -153,6 +154,7 @@ async def run() -> None:
         player.close()
         if detector:
             detector.close()
+        manager.terminate_pa()
         logger.info("Olivia client stopped.")
 
 

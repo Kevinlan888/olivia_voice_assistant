@@ -6,23 +6,21 @@ then returns the raw PCM bytes (int16, 16 kHz, mono).
 """
 
 import logging
-import math
-import struct
 import pyaudio
+import numpy as np
 
+from .audio_manager import manager
 from .config import settings
 
 logger = logging.getLogger(__name__)
 
 
 def _rms(chunk_bytes: bytes) -> float:
-    """Root-mean-square energy of a raw int16 PCM chunk."""
-    count = len(chunk_bytes) // 2
-    if count == 0:
+    """Root-mean-square energy of a raw int16 PCM chunk (numpy, no GIL pressure)."""
+    samples = np.frombuffer(chunk_bytes, dtype=np.int16)
+    if samples.size == 0:
         return 0.0
-    shorts = struct.unpack(f"{count}h", chunk_bytes)
-    sum_sq = sum(s * s for s in shorts)
-    return math.sqrt(sum_sq / count)
+    return float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
 
 
 class AudioRecorder:
@@ -36,7 +34,6 @@ class AudioRecorder:
     """
 
     def __init__(self):
-        self._pa = pyaudio.PyAudio()
         self._rate = settings.SAMPLE_RATE
         self._chunk = settings.CHUNK_FRAMES
         self._silence_threshold = settings.SILENCE_THRESHOLD
@@ -49,13 +46,24 @@ class AudioRecorder:
 
     def record(self) -> bytes:
         """Open the mic, record one utterance, return raw PCM bytes."""
-        stream = self._pa.open(
+        # Re-use the existing PortAudio context — no need to terminate/recreate
+        # it after the wake-word stream closed (same direction: input → input).
+        # fresh_pa() would add ~200 ms re-init latency and overflow the ALSA
+        # hardware buffer before we start reading, causing a gap at the start.
+        pa = manager.get_pa()
+        stream = pa.open(
             format=pyaudio.paInt16,
             channels=settings.CHANNELS,
             rate=self._rate,
             input=True,
             frames_per_buffer=self._chunk,
         )
+
+        # Discard any stale frames buffered during stream open.
+        _flush = int(0.1 * self._rate / self._chunk)   # ~100 ms
+        for _ in range(_flush):
+            stream.read(self._chunk, exception_on_overflow=False)
+
         logger.info("Recording … (speak now)")
 
         frames: list[bytes] = []
@@ -84,4 +92,4 @@ class AudioRecorder:
         return b"".join(frames)
 
     def close(self) -> None:
-        self._pa.terminate()
+        pass  # PyAudio lifecycle is managed by AudioManager

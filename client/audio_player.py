@@ -1,46 +1,70 @@
 """
-Audio player using pygame.mixer for decoding and pyaudio for output.
+Audio player using miniaudio for MP3 decoding and PyAudio for output.
 
 Streaming playback writes decoded PCM to a single continuous PyAudio output
 stream — analogous to the web client's MediaSource + SourceBuffer approach —
 eliminating the inter-segment gaps that plague load→play→load cycles.
+
+miniaudio decodes MP3 entirely in memory without touching an audio device,
+so there is no device-ownership conflict with the capture streams.
 """
 
-import io
 import logging
 import pyaudio
 import queue
 import threading
-import pygame
+import miniaudio
 
+from .audio_manager import manager
 from .config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# Output parameters — must match what edge-tts produces (24 kHz mono int16).
+_OUT_RATE = 24000
+_OUT_CHANNELS = 1
+
+
+def _decode_mp3(mp3_bytes: bytes) -> bytes:
+    """Decode MP3 bytes to raw int16 PCM using miniaudio (no audio device needed)."""
+    result = miniaudio.decode(
+        mp3_bytes,
+        output_format=miniaudio.SampleFormat.SIGNED16,
+        nchannels=_OUT_CHANNELS,
+        sample_rate=_OUT_RATE,
+    )
+    return bytes(result.samples)
 
 
 class AudioPlayer:
     """Thread-safe audio player with gapless streaming support."""
 
     def __init__(self):
-        pygame.mixer.pre_init(frequency=24000, size=-16, channels=1, buffer=512)
-        pygame.mixer.init()
         self._lock = threading.Lock()
         self._stream_queue: queue.Queue[bytes | None] | None = None
         self._stream_thread: threading.Thread | None = None
         self._stream_stop = threading.Event()
-        logger.info("AudioPlayer ready (pygame.mixer + pyaudio output)")
+        logger.info("AudioPlayer ready (miniaudio decoder + pyaudio output)")
 
     def play(self, mp3_bytes: bytes) -> None:
-        """Play MP3 bytes synchronously (blocks until playback ends)."""
+        """Decode MP3 and play synchronously via PyAudio (blocks until done)."""
         with self._lock:
-            buf = io.BytesIO(mp3_bytes)
-            pygame.mixer.music.load(buf, "mp3")
-            pygame.mixer.music.play()
-            while pygame.mixer.music.get_busy():
-                pygame.time.wait(50)
+            pcm = _decode_mp3(mp3_bytes)
+            pa = manager.fresh_pa()
+            stream = pa.open(
+                format=pyaudio.paInt16,
+                channels=_OUT_CHANNELS,
+                rate=_OUT_RATE,
+                output=True,
+            )
+            try:
+                stream.write(pcm)
+            finally:
+                stream.stop_stream()
+                stream.close()
 
     def stop(self) -> None:
-        pygame.mixer.music.stop()
         self._stream_stop.set()
 
     def start_stream(self) -> None:
@@ -76,7 +100,7 @@ class AudioPlayer:
 
     # ── Buffering thresholds ─────────────────────────────────────────────────
     # We accumulate ALL incoming MP3 bytes into a single growing buffer and
-    # re-decode the *entire* stream each time via pygame.mixer.Sound.  Only
+    # re-decode the *entire* stream each time via miniaudio.decode().  Only
     # the newly decoded PCM (delta) is appended to a ring buffer that a
     # PyAudio callback drains continuously.  This mirrors the web client's
     # MediaSource approach: one logical decoder session, zero inter-segment
@@ -88,8 +112,10 @@ class AudioPlayer:
         if q is None:
             return
 
-        freq, _fmt, channels = pygame.mixer.get_init()
-        pa = pyaudio.PyAudio()
+        pa = manager.fresh_pa()
+
+        freq = _OUT_RATE
+        channels = _OUT_CHANNELS
 
         # ── PCM ring buffer shared between decoder and audio callback ─────
         pcm_ring = bytearray()
@@ -109,14 +135,18 @@ class AudioPlayer:
                     pcm_ring.clear()
             return (data, pyaudio.paContinue)
 
-        out = pa.open(
-            format=pyaudio.paInt16,
-            channels=channels,
-            rate=freq,
-            output=True,
-            frames_per_buffer=2048,
-            stream_callback=_audio_callback,
-        )
+        try:
+            out = pa.open(
+                format=pyaudio.paInt16,
+                channels=channels,
+                rate=freq,
+                output=True,
+                frames_per_buffer=2048,
+                stream_callback=_audio_callback,
+            )
+        except Exception:
+            manager.ensure_mixer()
+            raise
         out.start_stream()
 
         all_mp3 = bytearray()      # complete MP3 bitstream received so far
@@ -126,8 +156,7 @@ class AudioPlayer:
             """Re-decode the full MP3 stream; push only new PCM to the ring."""
             nonlocal pcm_written
             try:
-                snd = pygame.mixer.Sound(io.BytesIO(bytes(all_mp3)))
-                pcm = snd.get_raw()
+                pcm = _decode_mp3(bytes(all_mp3))
                 new_pcm = pcm[pcm_written:]
                 if new_pcm:
                     with ring_lock:
@@ -175,8 +204,6 @@ class AudioPlayer:
                 out.close()
             except Exception:
                 pass
-            pa.terminate()
 
     def close(self) -> None:
         self.stop_stream(wait=False)
-        pygame.mixer.quit()
