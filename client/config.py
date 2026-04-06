@@ -5,12 +5,17 @@ class ClientSettings(BaseSettings):
     # ── Server connection ─────────────────────────────────────────────────────
     SERVER_WS_URL: str = "ws://localhost:8000/ws/audio"
 
-    # ── Wake word (openWakeWord) ──────────────────────────────────────────────
-    # Built-in model names include: "alexa", "hey mycroft", "hey jarvis", etc.
-    # Set to empty string to disable wake-word gating.
-    WAKE_WORD_KEYWORD: str = "alexa"
-    WAKE_WORD_THRESHOLD: float = 0.5
-    WAKE_WORD_CONSECUTIVE_HITS: int = 2   # frames above threshold required to trigger
+    # ── Wake word (Porcupine / Picovoice) ────────────────────────────────────
+    # Obtain a free access key at https://console.picovoice.ai/
+    PICOVOICE_ACCESS_KEY: str = ""
+    # Built-in keywords: alexa, americano, blueberry, bumblebee, computer,
+    #   grapefruit, grasshopper, hey google, hey siri, jarvis, ok google,
+    #   picovoice, porcupine, terminator
+    # Set to empty string to use WAKE_WORD_KEYWORD_PATH instead.
+    WAKE_WORD_KEYWORD: str = "porcupine"
+    # Optional path to a custom .ppn keyword file; takes precedence over WAKE_WORD_KEYWORD.
+    WAKE_WORD_KEYWORD_PATH: str = ""
+    WAKE_WORD_THRESHOLD: float = 0.5      # sensitivity 0.0–1.0 (higher = more sensitive)
     WAKE_WORD_COOLDOWN_SECONDS: float = 1.0  # ignore immediate retriggers after detection
 
     # ── Audio recording ───────────────────────────────────────────────────────
