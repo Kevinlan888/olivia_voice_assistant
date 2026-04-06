@@ -409,7 +409,35 @@ pip install --upgrade pip setuptools
 pip install -r client/requirements.txt
 ```
 
-#### 3.3 配置 `.env`
+#### 3.3 打包为可执行文件（可选）
+
+将客户端打包为单个可执行文件，部署时无需安装 Python 和 pip 依赖。
+
+```bash
+cd /opt/olivia-client
+source venv/bin/activate
+pip install pyinstaller
+
+pyinstaller --onefile run_client.py \
+  --name olivia-client \
+  --add-data ".env:." \
+  --add-data "client/models:client/models" \
+  --collect-all pvporcupine \
+  --collect-data miniaudio \
+  --hidden-import _cffi_backend
+```
+
+生成的可执行文件位于 `dist/olivia-client`，可直接运行：
+
+```bash
+./dist/olivia-client
+```
+
+> **注意**：目标机器仍需安装系统级依赖 `portaudio19-dev` 和 `libasound2`。
+> `.env` 和 Porcupine 模型文件已通过 `--add-data` 打包在内。
+> 如需修改配置，需重新打包。
+
+#### 3.4 配置 `.env`
 
 创建 `/opt/olivia-client/client/.env`：
 
