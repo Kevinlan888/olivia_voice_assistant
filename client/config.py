@@ -1,4 +1,14 @@
+import os
+import sys
 from pydantic_settings import BaseSettings
+
+
+def _env_file_path() -> str:
+    """Resolve .env path for both normal runs and PyInstaller bundles."""
+    if getattr(sys, "frozen", False):
+        # PyInstaller extracts --add-data files into sys._MEIPASS
+        return os.path.join(sys._MEIPASS, ".env")
+    return ".env"
 
 
 class ClientSettings(BaseSettings):
@@ -41,7 +51,7 @@ class ClientSettings(BaseSettings):
     STREAM_PLAYBACK: bool = True         # play assistant audio progressively
 
     class Config:
-        env_file = ".env"
+        env_file = _env_file_path()
         extra = "ignore"
 
 

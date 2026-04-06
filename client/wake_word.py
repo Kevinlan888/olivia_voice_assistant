@@ -11,6 +11,8 @@ Requires a free Picovoice access key — set PICOVOICE_ACCESS_KEY in .env.
 """
 
 import logging
+import os
+import sys
 import time
 import struct
 import threading
@@ -41,6 +43,9 @@ class WakeWordDetector:
         keyword = settings.WAKE_WORD_KEYWORD.strip().lower()
 
         if keyword_path:
+            # Resolve relative paths against PyInstaller bundle dir when frozen.
+            if not os.path.isabs(keyword_path) and getattr(sys, "frozen", False):
+                keyword_path = os.path.join(sys._MEIPASS, keyword_path)
             # Custom .ppn model file
             self._porcupine = pvporcupine.create(
                 access_key=access_key,
