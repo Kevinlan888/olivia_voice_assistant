@@ -45,11 +45,7 @@ class AudioRecorder:
         )
 
     def record(self) -> bytes:
-        """Open the mic, record one utterance, return raw PCM bytes."""
-        # Re-use the existing PortAudio context — no need to terminate/recreate
-        # it after the wake-word stream closed (same direction: input → input).
-        # fresh_pa() would add ~200 ms re-init latency and overflow the ALSA
-        # hardware buffer before we start reading, causing a gap at the start.
+        """Open the mic, record one utterance with VAD, return raw PCM bytes."""
         pa = manager.get_pa()
         stream = pa.open(
             format=pyaudio.paInt16,
@@ -89,6 +85,44 @@ class AudioRecorder:
             stream.close()
 
         logger.info("Recorded %d chunks (%.1fs)", total_chunks, total_chunks * self._chunk / self._rate)
+        return b"".join(frames)
+
+    def record_ptt(self, button) -> bytes:
+        """Record while the PTT button is held; stop when released.
+
+        Args:
+            button: PTTButton instance (already confirmed pressed before call).
+
+        Returns raw PCM bytes (int16, mono, SAMPLE_RATE Hz).
+        """
+        pa = manager.get_pa()
+        stream = pa.open(
+            format=pyaudio.paInt16,
+            channels=settings.CHANNELS,
+            rate=self._rate,
+            input=True,
+            frames_per_buffer=self._chunk,
+        )
+
+        # Flush stale buffer.
+        _flush = int(0.1 * self._rate / self._chunk)
+        for _ in range(_flush):
+            stream.read(self._chunk, exception_on_overflow=False)
+
+        logger.info("PTT recording …")
+        frames: list[bytes] = []
+        total_chunks = 0
+
+        try:
+            while button.is_pressed() and total_chunks < self._max_chunks:
+                chunk = stream.read(self._chunk, exception_on_overflow=False)
+                frames.append(chunk)
+                total_chunks += 1
+        finally:
+            stream.stop_stream()
+            stream.close()
+
+        logger.info("PTT released — recorded %d chunks (%.1fs)", total_chunks, total_chunks * self._chunk / self._rate)
         return b"".join(frames)
 
     def close(self) -> None:

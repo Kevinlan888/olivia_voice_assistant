@@ -22,6 +22,13 @@ class ClientSettings(BaseSettings):
     SILENCE_SECONDS: float = 1.5        # silence duration before stopping recording
     MAX_RECORDING_SECONDS: float = 15.0 # hard cap per utterance
 
+    # ── Push-to-talk button (Raspberry Pi GPIO) ───────────────────────────────
+    # Set PTT_GPIO_PIN to a BCM pin number to enable push-to-talk mode.
+    # While enabled, wake-word detection is bypassed: hold button → record,
+    # release → stop.  Set to -1 (default) to disable.
+    PTT_GPIO_PIN: int = -1              # BCM pin, e.g. 17; -1 = disabled
+    PTT_PULL_UP: bool = True            # True = pull-up (button connects to GND)
+
     # ── Playback ──────────────────────────────────────────────────────────────
     PLAYBACK_DEVICE_INDEX: int = -1     # -1 = system default
     STREAM_PLAYBACK: bool = True         # play assistant audio progressively

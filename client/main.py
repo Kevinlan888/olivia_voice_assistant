@@ -22,6 +22,7 @@ from .wake_word import WakeWordDetector
 from .audio_recorder import AudioRecorder
 from .audio_player import AudioPlayer
 from .ws_client import WSClient
+from .ptt_button import PTTButton
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,7 +68,21 @@ def _play_beep(player: AudioPlayer) -> None:
 
 
 async def run() -> None:
-    detector = WakeWordDetector() if settings.WAKE_WORD_KEYWORD.strip() else None
+    ptt_enabled = settings.PTT_GPIO_PIN >= 0
+    ptt: PTTButton | None = None
+    if ptt_enabled:
+        try:
+            ptt = PTTButton()
+        except Exception as exc:
+            logger.warning("PTT button unavailable (%s) — falling back to wake-word mode.", exc)
+            ptt_enabled = False
+
+    # PTT mode disables wake-word detection.
+    detector = (
+        None
+        if ptt_enabled or not settings.WAKE_WORD_KEYWORD.strip()
+        else WakeWordDetector()
+    )
     recorder = AudioRecorder()
     player = AudioPlayer()
 
@@ -118,15 +133,21 @@ async def run() -> None:
 
     try:
         while not stop_event.is_set():
-            # ── Step 1: Wake word ────────────────────────────────────────────
-            if detector:
-                await asyncio.to_thread(detector.wait_for_wake_word)
+            # ── Step 1: Wake word / PTT ──────────────────────────────────────
+            if ptt:
+                # PTT mode: block until button pressed, then record until released.
+                await asyncio.to_thread(ptt.wait_for_press)
+                await asyncio.to_thread(_play_beep, player)
+                raw_pcm = await asyncio.to_thread(recorder.record_ptt, ptt)
+            else:
+                if detector:
+                    await asyncio.to_thread(detector.wait_for_wake_word)
 
-            # ── Step 2: Acknowledgement beep ─────────────────────────────────
-            await asyncio.to_thread(_play_beep, player)
+                # ── Step 2: Acknowledgement beep ─────────────────────────────
+                await asyncio.to_thread(_play_beep, player)
 
-            # ── Step 3: Record utterance ─────────────────────────────────────
-            raw_pcm = await asyncio.to_thread(recorder.record)
+                # ── Step 3: Record utterance ──────────────────────────────────
+                raw_pcm = await asyncio.to_thread(recorder.record)
             if not raw_pcm:
                 continue
 
@@ -154,6 +175,8 @@ async def run() -> None:
         player.close()
         if detector:
             detector.close()
+        if ptt:
+            ptt.close()
         manager.terminate_pa()
         logger.info("Olivia client stopped.")
 
