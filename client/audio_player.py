@@ -115,7 +115,7 @@ class AudioPlayer:
         if not wait:
             self._stream_stop.set()
         if wait and self._stream_thread is not None:
-            self._stream_thread.join(timeout=30)
+            self._stream_thread.join()
         self._stream_queue = None
         self._stream_thread = None
 

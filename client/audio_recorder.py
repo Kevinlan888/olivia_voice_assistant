@@ -39,19 +39,24 @@ class AudioRecorder:
         self._calibration_frames = max(3, settings.SILENCE_CALIBRATION_FRAMES)
         self._speech_multiplier = max(1.1, settings.SILENCE_SPEECH_MULTIPLIER)
         self._silence_limit = int(settings.SILENCE_SECONDS * self._rate / self._chunk)
+        self._min_chunks = int(settings.MIN_RECORDING_SECONDS * self._rate / self._chunk)
         self._max_chunks = int(settings.MAX_RECORDING_SECONDS * self._rate / self._chunk)
         self._pre_stream = None
+        self._threshold: float | None = None   # set by pre_open_stream calibration
         logger.info(
             "AudioRecorder ready: rate=%d calibration_frames=%d speech_mult=%.1f",
             self._rate, self._calibration_frames, self._speech_multiplier,
         )
 
     def pre_open_stream(self) -> None:
-        """Open the mic stream in advance so PyAudio starts buffering immediately.
+        """Open the mic stream AND calibrate the noise floor before the beep.
 
-        Call this BEFORE playing the acknowledgement beep.  Then call record()
-        as usual — it will reuse the already-open stream and flush the audio
-        captured during the beep, so no initial speech is lost.
+        Call this BEFORE playing the acknowledgement beep.  The environment is
+        still quiet at this point, so the calibration reads a true ambient
+        noise floor — uncontaminated by the beep's acoustic echo.
+
+        record() will reuse the already-open stream, flush the frames captured
+        during the beep, and skip calibration.
         """
         if self._pre_stream is not None:
             return  # already open
@@ -63,7 +68,17 @@ class AudioRecorder:
             input=True,
             frames_per_buffer=self._chunk,
         )
-        logger.debug("Mic stream pre-opened")
+        # ── Calibrate noise floor NOW (environment is quiet) ──────────────
+        cal_rms_values = []
+        for _ in range(self._calibration_frames):
+            chunk = self._pre_stream.read(self._chunk, exception_on_overflow=False)
+            cal_rms_values.append(_rms(chunk))
+        noise_floor = max(float(np.median(cal_rms_values)), 50.0)
+        self._threshold = noise_floor * self._speech_multiplier
+        logger.info(
+            "Pre-beep calibration: noise_floor=%.0f → threshold=%.0f",
+            noise_floor, self._threshold,
+        )
 
     def record(self) -> bytes:
         """Open the mic, record one utterance with VAD, return raw PCM bytes."""
@@ -90,27 +105,27 @@ class AudioRecorder:
             for _ in range(_flush):
                 stream.read(self._chunk, exception_on_overflow=False)
 
+        # ── Determine speech threshold ─────────────────────────────────────
+        # If pre_open_stream() already calibrated (before the beep), reuse it.
+        # Otherwise fall back to inline calibration (no pre-open path).
+        if self._threshold is not None:
+            threshold = self._threshold
+            self._threshold = None          # consume; recalibrate next time
+            logger.info("Using pre-beep threshold=%.0f", threshold)
+        else:
+            cal_rms = []
+            for _ in range(self._calibration_frames):
+                chunk = stream.read(self._chunk, exception_on_overflow=False)
+                cal_rms.append(_rms(chunk))
+            noise_floor = max(float(np.median(cal_rms)), 50.0)
+            threshold = noise_floor * self._speech_multiplier
+            logger.info("Inline calibration: noise_floor=%.0f → threshold=%.0f", noise_floor, threshold)
+
         logger.info("Recording … (speak now)")
 
-        # ── Adaptive noise floor calibration ───────────────────────────────────
-        # Read a few frames of ambient noise to set the threshold dynamically.
-        # This eliminates per-environment manual tuning.
-        cal_rms_values = []
-        cal_frames: list[bytes] = []
-        for _ in range(self._calibration_frames):
-            chunk = stream.read(self._chunk, exception_on_overflow=False)
-            cal_frames.append(chunk)
-            cal_rms_values.append(_rms(chunk))
-
-        noise_floor = float(np.median(cal_rms_values))
-        # Clamp noise floor to a sane minimum so dead-silent rooms still work.
-        noise_floor = max(noise_floor, 50.0)
-        threshold = noise_floor * self._speech_multiplier
-        logger.info("Noise floor=%.0f → speech threshold=%.0f", noise_floor, threshold)
-
-        frames: list[bytes] = list(cal_frames)   # keep calibration frames (may contain speech)
+        frames: list[bytes] = []
         silent_chunks = 0
-        total_chunks = len(cal_frames)
+        total_chunks = 0
         speech_detected = False
 
         try:
@@ -127,9 +142,9 @@ class AudioRecorder:
                     silent_chunks = 0
                     speech_detected = True
 
-                # Stop on sustained silence — but only after speech was detected,
-                # so we don't bail on the brief quiet before the user starts talking.
-                if speech_detected and silent_chunks >= self._silence_limit:
+                # Stop on sustained silence — but only after speech was detected
+                # and the minimum recording duration has elapsed.
+                if speech_detected and total_chunks >= self._min_chunks and silent_chunks >= self._silence_limit:
                     logger.info("Silence detected — stopping recording.")
                     if silent_chunks <= len(frames):
                         frames = frames[: len(frames) - silent_chunks]
