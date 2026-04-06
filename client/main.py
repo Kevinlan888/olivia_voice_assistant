@@ -53,7 +53,7 @@ def _play_beep(player: AudioPlayer) -> None:
     ]
     raw_pcm = struct.pack(f"{num_samples}h", *samples)
 
-    pa = manager.fresh_pa()
+    pa = manager.get_pa()
     stream = pa.open(
         format=pyaudio.paInt16,
         channels=1,
