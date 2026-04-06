@@ -45,6 +45,8 @@ class WSClient:
         on_status=None,
         on_status_audio=None,
         on_audio_chunk=None,
+        on_user_text=None,
+        on_assistant_text=None,
     ):
         self._url = settings.SERVER_WS_URL
         self._ws = None
@@ -52,6 +54,8 @@ class WSClient:
         self._on_status = on_status
         self._on_status_audio = on_status_audio
         self._on_audio_chunk = on_audio_chunk
+        self._on_user_text = on_user_text
+        self._on_assistant_text = on_assistant_text
 
     # ── Connection management ─────────────────────────────────────────────────
 
@@ -170,6 +174,18 @@ class WSClient:
 
                     elif message == "PONG":
                         pass  # ignore keepalive echo
+
+                    elif message.startswith("USER_TEXT:"):
+                        user_text = message[9:]
+                        logger.info("[ASR] %s", user_text)
+                        if self._on_user_text:
+                            await self._on_user_text(user_text)
+
+                    elif message.startswith("ASSISTANT_TEXT:"):
+                        assistant_text = message[14:]
+                        logger.info("[LLM] %s", assistant_text)
+                        if self._on_assistant_text:
+                            await self._on_assistant_text(assistant_text)
 
         except ConnectionClosedError as exc:
             logger.warning("Connection closed unexpectedly: %s", exc)
