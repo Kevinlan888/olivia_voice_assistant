@@ -147,7 +147,11 @@ async def run() -> None:
                 if detector:
                     await asyncio.to_thread(detector.wait_for_wake_word)
 
-                # ── Step 2: Acknowledgement beep ─────────────────────────────
+                # ── Step 2: Pre-open mic, then play acknowledgement beep ──────
+                # Pre-opening before the beep lets PyAudio start buffering audio
+                # immediately.  record() will flush the frames captured during
+                # the beep, so the user's first syllable is never lost.
+                await asyncio.to_thread(recorder.pre_open_stream)
                 await asyncio.to_thread(_play_beep, player)
 
                 # ── Step 3: Record utterance ──────────────────────────────────

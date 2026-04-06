@@ -39,26 +39,55 @@ class AudioRecorder:
         self._silence_threshold = settings.SILENCE_THRESHOLD
         self._silence_limit = int(settings.SILENCE_SECONDS * self._rate / self._chunk)
         self._max_chunks = int(settings.MAX_RECORDING_SECONDS * self._rate / self._chunk)
+        self._pre_stream = None
         logger.info(
             "AudioRecorder ready: rate=%d silence_threshold=%.0f",
             self._rate, self._silence_threshold,
         )
 
-    def record(self) -> bytes:
-        """Open the mic, record one utterance with VAD, return raw PCM bytes."""
+    def pre_open_stream(self) -> None:
+        """Open the mic stream in advance so PyAudio starts buffering immediately.
+
+        Call this BEFORE playing the acknowledgement beep.  Then call record()
+        as usual — it will reuse the already-open stream and flush the audio
+        captured during the beep, so no initial speech is lost.
+        """
+        if self._pre_stream is not None:
+            return  # already open
         pa = manager.get_pa()
-        stream = pa.open(
+        self._pre_stream = pa.open(
             format=pyaudio.paInt16,
             channels=settings.CHANNELS,
             rate=self._rate,
             input=True,
             frames_per_buffer=self._chunk,
         )
+        logger.debug("Mic stream pre-opened")
 
-        # Discard any stale frames buffered during stream open.
-        _flush = int(0.1 * self._rate / self._chunk)   # ~100 ms
-        for _ in range(_flush):
-            stream.read(self._chunk, exception_on_overflow=False)
+    def record(self) -> bytes:
+        """Open the mic, record one utterance with VAD, return raw PCM bytes."""
+        if self._pre_stream is not None:
+            stream = self._pre_stream
+            self._pre_stream = None
+            # Flush ALL audio buffered while the stream was pre-open (covers
+            # the beep duration + any PyAudio open latency).
+            stale = stream.get_read_available()
+            if stale > 0:
+                stream.read(stale, exception_on_overflow=False)
+                logger.debug("Flushed %d stale frames from pre-open stream", stale)
+        else:
+            pa = manager.get_pa()
+            stream = pa.open(
+                format=pyaudio.paInt16,
+                channels=settings.CHANNELS,
+                rate=self._rate,
+                input=True,
+                frames_per_buffer=self._chunk,
+            )
+            # Discard frames buffered during stream open (~100 ms).
+            _flush = int(0.1 * self._rate / self._chunk)
+            for _ in range(_flush):
+                stream.read(self._chunk, exception_on_overflow=False)
 
         logger.info("Recording … (speak now)")
 
@@ -126,4 +155,10 @@ class AudioRecorder:
         return b"".join(frames)
 
     def close(self) -> None:
-        pass  # PyAudio lifecycle is managed by AudioManager
+        if self._pre_stream is not None:
+            try:
+                self._pre_stream.stop_stream()
+                self._pre_stream.close()
+            except Exception:
+                pass
+            self._pre_stream = None
