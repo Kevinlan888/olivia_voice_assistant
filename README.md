@@ -5,8 +5,10 @@
 - ASR：Faster-Whisper
 - LLM：OpenAI 兼容 API / Ollama
 - TTS：Edge-TTS / GPT-SoVITS
+- VAD：Silero VAD（神经网络语音活动检测，ONNX 推理）
+- 唤醒词：Porcupine（Picovoice 离线唤醒词）
 - 工具调用：Function Calling（天气、联网搜索、智能家居）
-- 前端：手机网页（单文件 `web_client/index.html`）
+- 前端：Vue 3 网页客户端 / 树莓派 Python 客户端
 
 ## 架构概览
 
@@ -26,7 +28,8 @@ olivia_voice_assistant/
 ├─ client/
 │  ├─ main.py
 │  ├─ ws_client.py
-│  ├─ audio_recorder.py
+│  ├─ audio_recorder.py      # 录音 + Silero VAD 语音端点检测
+│  ├─ silero_vad.py           # Silero VAD ONNX 封装（自动下载模型）
 │  ├─ audio_player.py
 │  ├─ wake_word.py
 │  ├─ config.py

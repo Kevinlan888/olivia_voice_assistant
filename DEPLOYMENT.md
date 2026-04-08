@@ -22,6 +22,8 @@
 - **ASR（语音识别）**：Faster-Whisper（离线）
 - **LLM（大语言模型）**：OpenAI API / Ollama 本地模型
 - **TTS（文字转语音）**：Edge-TTS / GPT-SoVITS
+- **VAD（语音活动检测）**：Silero VAD（神经网络，ONNX 推理）
+- **唤醒词**：Porcupine（Picovoice 离线唤醒词检测）
 - **工具调用**：天气查询、网络搜索、智能家居控制（Function Calling）
 - **前端**：Vue 3 单页应用（支持手机/PC浏览器）
 
@@ -443,19 +445,26 @@ pyinstaller --onefile run_client.py \
 
 ```bash
 # 服务器连接
-SERVER_WS_URL=ws://192.168.1.100:8000/ws/audio
+ SERVER_WS_URL=ws://192.168.1.100:8000/ws/audio
 
-# 唤醒词（openWakeWord）
-WAKE_WORD_KEYWORD=alexa
+# 唤醒词（Porcupine）
+PICOVOICE_ACCESS_KEY=​           # https://console.picovoice.ai/ 免费获取
+WAKE_WORD_KEYWORD=porcupine
 WAKE_WORD_THRESHOLD=0.5
 
-# 音频
-SAMPLE_RATE=16000
-CHANNELS=1
-SILENCE_THRESHOLD=300.0
+# Silero VAD 语音活动检测
+SILERO_SPEECH_THRESHOLD=0.5     # 0.0–1.0，推荐 0.5
 SILENCE_SECONDS=1.5
-MAX_RECORDING_SECONDS=15.0
-PLAYBACK_DEVICE_INDEX=-1  # -1 = 系统默认
+MIN_RECORDING_SECONDS=1.0
+MAX_RECORDING_SECONDS=15
+
+# 音频
+PLAYBACK_DEVICE_INDEX=-1        # -1 = 系统默认
+STREAM_PLAYBACK=false
+
+# 按键说话模式（可选，树莓派 GPIO）
+# PTT_GPIO_PIN=17
+# PTT_PULL_UP=false
 ```
 
 #### 3.4 Systemd 自启动
@@ -854,8 +863,8 @@ export SAMPLE_RATE=8000
 # 2. 缩短沉默检测时间
 export SILENCE_SECONDS=0.8
 
-# 3. 禁用不必要的日志
-export LOG_LEVEL=WARNING
+# 3. 调整 Silero VAD 灵敏度（降低 = 更容易触发语音检测）
+export SILERO_SPEECH_THRESHOLD=0.4
 ```
 
 ---
@@ -1027,9 +1036,10 @@ cat diagnosis.txt
 - **Faster-Whisper**: OpenAI 语音识别模型
 - **Ollama**: 本地 LLM 运行时
 - **Edge-TTS**: Microsoft 文字转语音
-- **openWakeWord**: 本地唤醒词检测（开源免费）
+- **Silero VAD**: 神经网络语音活动检测（ONNX Runtime）
+- **Porcupine**: Picovoice 离线唤醒词检测
 
 ---
 
-**最后更新**：2026-03-27  
+**最后更新**：2026-04-08  
 **维护者**：Olivia 项目团队

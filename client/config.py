@@ -32,11 +32,10 @@ class ClientSettings(BaseSettings):
     SAMPLE_RATE: int = 16000
     CHANNELS: int = 1
     CHUNK_FRAMES: int = 512             # frames per PyAudio buffer read
-    # Silence detection (adaptive noise gate)
-    SILENCE_CALIBRATION_FRAMES: int = 10  # frames to sample noise floor at start
-    SILENCE_SPEECH_MULTIPLIER: float = 1.5  # RMS > noise_floor * multiplier = speech
+    # Silero VAD (neural-network voice activity detection)
+    SILERO_SPEECH_THRESHOLD: float = 0.5  # prob ≥ this = speech (0.0–1.0)
     SILENCE_SECONDS: float = 0.8        # silence duration before stopping recording
-    MIN_RECORDING_SECONDS: float = 2.0  # minimum recording duration before VAD can stop
+    MIN_RECORDING_SECONDS: float = 1.0  # minimum recording duration before VAD can stop
     MAX_RECORDING_SECONDS: float = 15.0 # hard cap per utterance
 
     # ── Push-to-talk button (Raspberry Pi GPIO) ───────────────────────────────
