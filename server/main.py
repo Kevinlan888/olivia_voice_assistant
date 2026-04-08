@@ -83,21 +83,17 @@ def _save_audio(raw_pcm: bytes) -> None:
         logger.warning("[SAVE_AUDIO] Failed to save audio: %s", exc)
 
 
-async def _try_resume_session(text: str, ctx: RunContext) -> bool:
-    """If *text* is a ``{"resume_session": "<id>"}`` JSON frame, restore the
-    session into *ctx* and return True.  Otherwise return False."""
+async def _auto_resume_session(ctx: RunContext) -> bool:
+    """Try to restore the most recent session into *ctx*.
+
+    Returns True if a qualifying session was found and restored.
+    """
     if not settings.ENABLE_PERSISTENCE:
         return False
-    try:
-        data = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return False
-    sid = data.get("resume_session")
-    if not sid:
-        return False
-    session = await storage.load_session(sid)
+    session = await storage.get_latest_session(
+        timeout_minutes=settings.SESSION_TIMEOUT_MINUTES,
+    )
     if not session:
-        logger.warning("[Resume] session %s not found", sid)
         return False
     ctx.session_id = session["session_id"]
     ctx.summary = session["summary"]
@@ -154,8 +150,11 @@ async def audio_endpoint(websocket: WebSocket):
     audio_buffer = io.BytesIO()
     use_v2 = False  # protocol version flag
 
-    # Persist session
-    if settings.ENABLE_PERSISTENCE:
+    # Auto-resume the most recent session, or create a new one
+    resumed = await _auto_resume_session(ctx)
+    if resumed:
+        logger.info("Auto-resumed session %s", ctx.session_id)
+    elif settings.ENABLE_PERSISTENCE:
         await storage.create_session(ctx.session_id)
 
     # Build the multi-agent graph once per connection
@@ -178,16 +177,6 @@ async def audio_endpoint(websocket: WebSocket):
                     use_v2 = True
                     await websocket.send_text(json.dumps({"protocol": "v2", "status": "ok"}))
                     logger.info("Client upgraded to protocol v2")
-                    continue
-
-                # Resume a previous session
-                resumed = await _try_resume_session(text, ctx)
-                if resumed:
-                    await websocket.send_text(json.dumps({
-                        "event": "session_resumed",
-                        "session_id": ctx.session_id,
-                    }))
-                    logger.info("Resumed session %s", ctx.session_id)
                     continue
 
                 cmd = text.upper()

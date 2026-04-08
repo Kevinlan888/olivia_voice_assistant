@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -127,6 +127,25 @@ async def load_session(session_id: str, max_messages: int = 40) -> dict | None:
         messages.append(msg)
 
     return {"session_id": row[0], "summary": row[1], "messages": messages}
+
+
+async def get_latest_session(timeout_minutes: int = 30, max_messages: int = 40) -> dict | None:
+    """Return the most recently updated session if it is within *timeout_minutes*.
+
+    Returns the same shape as :func:`load_session`, or ``None`` if no
+    qualifying session exists.
+    """
+    assert _db
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=timeout_minutes)
+    async with _db.execute(
+        "SELECT session_id FROM sessions "
+        "WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT 1",
+        (cutoff.isoformat(),),
+    ) as cursor:
+        row = await cursor.fetchone()
+    if not row:
+        return None
+    return await load_session(row[0], max_messages)
 
 
 async def list_sessions(limit: int = 20) -> list[dict]:

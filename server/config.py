@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     # ── Persistence ──────────────────────────────────────────────────────
     ENABLE_PERSISTENCE: bool = True
     DB_PATH: str = "data/conversations.db"
+    SESSION_TIMEOUT_MINUTES: int = 30
 
     # ── Search ───────────────────────────────────────────────────────────────
     SERPAPI_KEY: str = ""
