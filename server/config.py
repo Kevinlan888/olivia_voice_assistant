@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     # SAVE_UPLOAD_AUDIO_DIR for later ASR analysis / debugging.
     SAVE_UPLOAD_AUDIO: bool = False
     SAVE_UPLOAD_AUDIO_DIR: str = "audio_logs"
+
+    # ── Agent framework ───────────────────────────────────────────────────────
+    AGENT_MAX_TOOL_ROUNDS: int = 5
+    AGENT_ENABLE_TRACING: bool = True
+    LLM_STREAMING: bool = True
+
     class Config:
         env_file = ".env"
         extra = "ignore"

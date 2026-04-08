@@ -6,14 +6,28 @@ For production, swap in OpenWeatherMap or any paid provider.
 """
 
 import logging
+from typing import Annotated
+
 import httpx
+from pydantic import Field
+
+from ..agent_framework import function_tool
 
 logger = logging.getLogger(__name__)
 
 _HTTP = httpx.AsyncClient(timeout=10.0)
 
 
-async def get_weather(city: str) -> dict:
+@function_tool(
+    description=(
+        "获取指定城市当前或未来24小时的天气信息，包括温度、天气状况和降雨概率。"
+        "当用户询问天气、是否需要带伞、今天热不热等问题时调用此工具。"
+    ),
+    status_message="正在查询天气...",
+)
+async def get_weather(
+    city: Annotated[str, Field(description="城市名称，例如 '北京'、'上海'、'深圳'")],
+) -> dict:
     """
     Fetch current weather for *city* from wttr.in.
 

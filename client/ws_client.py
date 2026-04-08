@@ -4,16 +4,35 @@ Async WebSocket client.
 Sends PCM audio to the server and receives MP3 audio back.
 Handles chunked streaming and STATUS frames for tool-calling feedback.
 
-New server signals handled here:
-  STATUS:<msg>         — server is executing a tool; play status_audio if provided,
-                         otherwise just log.  The server may optionally follow this
-                         with binary audio chunks + STATUS_AUDIO_DONE.
-  STATUS_AUDIO_DONE    — the short status-hint audio has finished; resume collecting
-                         the final reply audio into a fresh buffer.
+Supports both protocol v1 (plain text frames) and v2 (JSON events).
+Protocol negotiation: after connecting, sends ``{"protocol": "v2"}``
+and upgrades if the server acknowledges. Falls back to v1 otherwise.
+
+v1 signals:
+  STATUS:<msg>         — server is executing a tool
+  STATUS_AUDIO_DONE    — status audio clip finished
+  USER_TEXT:<msg>      — ASR result
+  ASSISTANT_TEXT:<msg> — final LLM reply
+  DONE / EMPTY / ERROR:<msg> / PONG
+
+v2 JSON events:
+  {"event": "status", "text": "..."}
+  {"event": "user_text", "text": "..."}
+  {"event": "assistant_text", "text": "...", "agent": "..."}
+  {"event": "tool_start", "tool": "...", "args": {...}}
+  {"event": "tool_end", "tool": "...", "result": "..."}
+  {"event": "handoff", "from": "...", "to": "..."}
+  {"event": "llm_token", "token": "..."}
+  {"event": "agent_start", "agent": "..."}
+  {"event": "agent_end", "agent": "..."}
+  {"event": "audio_done"}
+  {"event": "empty"}
+  {"event": "error", "message": "..."}
 """
 
 import asyncio
 import io
+import json
 import logging
 import websockets
 from websockets.exceptions import ConnectionClosedError
@@ -31,13 +50,21 @@ class WSClient:
 
     Args:
         on_status: Optional async callback(msg: str) invoked whenever the
-                   server sends a STATUS frame.  Use this to update a UI
-                   indicator or emit a local beep on the client device.
+                   server sends a STATUS frame.
         on_status_audio: Optional async callback(mp3_bytes: bytes) invoked
-                         when the server pushes a synthesised status audio
-                         clip (STATUS_AUDIO_DONE marks its end).  The client
-                         should play this immediately so the user gets instant
-                         voice feedback while tools are running.
+                         when the server pushes a synthesised status audio clip.
+        on_audio_chunk: Optional async callback(mp3_bytes: bytes) invoked for
+                        each audio chunk received.
+        on_user_text: Optional async callback(text: str) invoked with ASR result.
+        on_assistant_text: Optional async callback(text: str) invoked with LLM reply.
+        on_llm_token: Optional async callback(token: str) invoked for each
+                      streaming LLM token (v2 only).
+        on_tool_start: Optional async callback(tool: str, args: dict) invoked
+                       when a tool starts executing (v2 only).
+        on_tool_end: Optional async callback(tool: str, result: str) invoked
+                     when a tool finishes (v2 only).
+        on_handoff: Optional async callback(from_agent: str, to_agent: str)
+                    invoked when agent handoff occurs (v2 only).
     """
 
     def __init__(
@@ -47,6 +74,10 @@ class WSClient:
         on_audio_chunk=None,
         on_user_text=None,
         on_assistant_text=None,
+        on_llm_token=None,
+        on_tool_start=None,
+        on_tool_end=None,
+        on_handoff=None,
     ):
         self._url = settings.SERVER_WS_URL
         self._ws = None
@@ -56,6 +87,11 @@ class WSClient:
         self._on_audio_chunk = on_audio_chunk
         self._on_user_text = on_user_text
         self._on_assistant_text = on_assistant_text
+        self._on_llm_token = on_llm_token
+        self._on_tool_start = on_tool_start
+        self._on_tool_end = on_tool_end
+        self._on_handoff = on_handoff
+        self._use_v2 = False
 
     # ── Connection management ─────────────────────────────────────────────────
 
@@ -68,6 +104,23 @@ class WSClient:
         )
         self._ping_task = asyncio.create_task(self._keepalive())
         logger.info("Connected.")
+
+        # Attempt v2 protocol upgrade
+        try:
+            await self._ws.send(json.dumps({"protocol": "v2"}))
+            # Wait briefly for acknowledgement
+            resp = await asyncio.wait_for(self._ws.recv(), timeout=2.0)
+            if isinstance(resp, str):
+                try:
+                    data = json.loads(resp)
+                    if data.get("protocol") == "v2" and data.get("status") == "ok":
+                        self._use_v2 = True
+                        logger.info("Upgraded to protocol v2")
+                except json.JSONDecodeError:
+                    pass
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.debug("v2 upgrade failed, using v1: %s", exc)
+            self._use_v2 = False
 
     def _is_connected(self) -> bool:
         """Compatibility check for websocket open state across websockets versions."""
@@ -93,6 +146,7 @@ class WSClient:
             self._ping_task.cancel()
         if self._ws:
             await self._ws.close()
+        self._use_v2 = False
         logger.info("Disconnected.")
 
     async def _keepalive(self) -> None:
@@ -125,16 +179,114 @@ class WSClient:
         await self._ws.send("END")
         logger.info("Sent audio (%d bytes), waiting for response …", len(raw_pcm))
 
-        # 3. Collect response (binary = audio, text = control)
+        # 3. Collect response
+        if self._use_v2:
+            return await self._collect_v2()
+        else:
+            return await self._collect_v1()
+
+    # ── v2 response collection ────────────────────────────────────────────────
+
+    async def _collect_v2(self) -> bytes | None:
+        """Collect response using v2 JSON events."""
         audio_buf = io.BytesIO()
-        status_audio_buf: io.BytesIO | None = None  # accumulates STATUS audio
 
         try:
             async for message in self._ws:
                 if isinstance(message, bytes):
-                    # Bytes go into the active buffer:
-                    #   - status_audio_buf while receiving a status clip
-                    #   - audio_buf for the final reply
+                    audio_buf.write(message)
+                    if self._on_audio_chunk:
+                        await self._on_audio_chunk(message)
+
+                elif isinstance(message, str):
+                    # PONG is still plain text
+                    if message == "PONG":
+                        continue
+
+                    try:
+                        data = json.loads(message)
+                    except json.JSONDecodeError:
+                        logger.warning("Non-JSON v2 frame: %s", message[:100])
+                        continue
+
+                    event = data.get("event")
+
+                    if event == "audio_done":
+                        logger.info("Response complete (%d bytes)", audio_buf.tell())
+                        return audio_buf.getvalue()
+
+                    elif event == "empty":
+                        logger.info("Server: no speech detected.")
+                        return None
+
+                    elif event == "error":
+                        logger.error("Server error: %s", data.get("message", ""))
+                        return None
+
+                    elif event == "user_text":
+                        text = data.get("text", "")
+                        logger.info("[ASR] %s", text)
+                        if self._on_user_text:
+                            await self._on_user_text(text)
+
+                    elif event == "assistant_text":
+                        text = data.get("text", "")
+                        logger.info("[LLM] %s (agent=%s)", text, data.get("agent", ""))
+                        if self._on_assistant_text:
+                            await self._on_assistant_text(text)
+
+                    elif event == "status":
+                        text = data.get("text", "")
+                        logger.info("[STATUS] %s", text)
+                        if self._on_status:
+                            await self._on_status(text)
+
+                    elif event == "llm_token":
+                        token = data.get("token", "")
+                        if self._on_llm_token:
+                            await self._on_llm_token(token)
+
+                    elif event == "tool_start":
+                        tool = data.get("tool", "")
+                        args = data.get("args", {})
+                        logger.info("[TOOL_START] %s %s", tool, args)
+                        if self._on_tool_start:
+                            await self._on_tool_start(tool, args)
+
+                    elif event == "tool_end":
+                        tool = data.get("tool", "")
+                        result = data.get("result", "")
+                        logger.info("[TOOL_END] %s", tool)
+                        if self._on_tool_end:
+                            await self._on_tool_end(tool, result)
+
+                    elif event == "handoff":
+                        from_agent = data.get("from", "")
+                        to_agent = data.get("to", "")
+                        logger.info("[HANDOFF] %s → %s", from_agent, to_agent)
+                        if self._on_handoff:
+                            await self._on_handoff(from_agent, to_agent)
+
+                    elif event in ("agent_start", "agent_end", "guardrail"):
+                        logger.debug("[%s] %s", event, data)
+
+        except ConnectionClosedError as exc:
+            logger.warning("Connection closed unexpectedly: %s", exc)
+            self._ws = None
+            return None
+
+        return audio_buf.getvalue() or None
+
+    # ── v1 response collection ────────────────────────────────────────────────
+
+    async def _collect_v1(self) -> bytes | None:
+        """Collect response using v1 plain-text frames."""
+        audio_buf = io.BytesIO()
+        status_audio_buf: io.BytesIO | None = None
+
+        try:
+            async for message in self._ws:
+                if isinstance(message, bytes):
                     if status_audio_buf is not None:
                         status_audio_buf.write(message)
                     else:
@@ -156,16 +308,13 @@ class WSClient:
                         return None
 
                     elif message.startswith("STATUS:"):
-                        # Tool is running — notify upper layer immediately
                         status_text = message[7:]
                         logger.info("[STATUS] %s", status_text)
                         if self._on_status:
                             await self._on_status(status_text)
-                        # Begin collecting possible status audio clip
                         status_audio_buf = io.BytesIO()
 
                     elif message == "STATUS_AUDIO_DONE":
-                        # Server finished sending the status audio clip
                         if status_audio_buf is not None:
                             clip = status_audio_buf.getvalue()
                             status_audio_buf = None
@@ -173,16 +322,16 @@ class WSClient:
                                 await self._on_status_audio(clip)
 
                     elif message == "PONG":
-                        pass  # ignore keepalive echo
+                        pass
 
                     elif message.startswith("USER_TEXT:"):
-                        user_text = message[9:]
+                        user_text = message[10:]
                         logger.info("[ASR] %s", user_text)
                         if self._on_user_text:
                             await self._on_user_text(user_text)
 
                     elif message.startswith("ASSISTANT_TEXT:"):
-                        assistant_text = message[14:]
+                        assistant_text = message[15:]
                         logger.info("[LLM] %s", assistant_text)
                         if self._on_assistant_text:
                             await self._on_assistant_text(assistant_text)

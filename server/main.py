@@ -1,32 +1,41 @@
 """
-Olivia Voice Assistant — FastAPI Server  (with Tool Calling)
-=============================================================
-WebSocket 协议 (文本帧 / 二进制帧):
+Olivia Voice Assistant — FastAPI Server  (v2: Agent Framework + Streaming)
+==========================================================================
+WebSocket 协议:
 
+  v1 (legacy, plain text frames)
+  ─────────────────────────────
   Client → Server:
     binary  : PCM audio chunk (16-bit, 16 kHz, mono)
     text    : "END"        — 录音结束，触发完整处理管道
     text    : "PING"       — 保活心跳
 
   Server → Client:
-        text    : "USER_TEXT:<msg>"    — ASR 识别出的用户文本
-        text    : "ASSISTANT_TEXT:<msg>" — 助手最终文本回复
-    text    : "STATUS:<msg>"       — 工具调用状态提示（立即推送）
-    text    : "STATUS_AUDIO_DONE"  — 状态提示音发送完毕（可选）
-    binary  : MP3 audio chunk      — TTS 结果（分批流式）
-    text    : "DONE"               — 本轮音频发送完毕
-    text    : "EMPTY"              — 未识别到有效语音
-    text    : "ERROR:<msg>"        — 处理异常
-    text    : "PONG"               — 心跳回应
+    text    : "USER_TEXT:<msg>"      — ASR 识别出的用户文本
+    text    : "ASSISTANT_TEXT:<msg>" — 助手最终文本回复
+    text    : "STATUS:<msg>"         — 工具调用状态提示（立即推送）
+    text    : "STATUS_AUDIO_DONE"    — 状态提示音发送完毕（可选）
+    binary  : MP3 audio chunk        — TTS 结果（分批流式）
+    text    : "DONE"                 — 本轮音频发送完毕
+    text    : "EMPTY"                — 未识别到有效语音
+    text    : "ERROR:<msg>"          — 处理异常
+    text    : "PONG"                 — 心跳回应
+
+  v2 (JSON events — client sends {"protocol": "v2"} as first frame)
+  ─────────────────────────────────────────────────────────────────
+  Server → Client text: JSON events (see protocol.py)
+  Server → Client binary: MP3 audio chunks (unchanged)
+  Client → Server: unchanged (binary PCM + text "END"/"PING")
 """
 
 import asyncio
 import io
+import json
 import logging
 import os
 import wave
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -40,7 +49,11 @@ from .llm.openai_llm import OpenAILLM
 from .llm.ollama_llm import OllamaLLM
 from .tts.edge_tts_engine import EdgeTTSEngine
 from .tts.sovits_tts import SovitsTTS
-from .agent import ToolAgent
+from .agent_framework import RunContext, Runner, EventEmitter
+from .agent_framework import events as ev
+from .agent_framework.sentence_splitter import SentenceSplitter
+from .agents import create_router_agent
+from .protocol import event_to_v1, event_to_v2, is_v2_handshake
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,54 +112,6 @@ app.add_middleware(
 )
 
 
-# ── Per-connection conversation history ───────────────────────────────────────
-class Session:
-    def __init__(self):
-        self.history: list[dict] = []
-
-    def add(self, role: str, content: str):
-        self.history.append({"role": role, "content": content})
-        # Keep only the last N turns to bound token usage
-        max_msgs = settings.MAX_HISTORY_TURNS * 2
-        if len(self.history) > max_msgs:
-            self.history = self.history[-max_msgs:]
-
-    def messages(self) -> list[dict]:
-        return [{"role": "system", "content": _build_system_prompt()}] + self.history
-
-
-def _build_system_prompt() -> str:
-    now = datetime.now().astimezone()
-    timezone_name = now.tzname() or "local"
-    current_time_text = now.strftime("%Y-%m-%d %H:%M:%S")
-
-    is_english = settings.WHISPER_LANGUAGE.lower() in ("en", "english")
-
-    if is_english:
-        weekday_text = now.strftime("%A")
-        base_prompt = settings.SYSTEM_PROMPT_EN
-        time_context = (
-            f"The following real-time context is provided by the system — treat it as fact:\n"
-            f"- Current local time: {current_time_text}\n"
-            f"- Day of week: {weekday_text}\n"
-            f"- Timezone: {timezone_name}"
-        )
-    else:
-        weekday_map = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-        weekday_text = weekday_map[now.weekday()]
-        base_prompt = settings.SYSTEM_PROMPT
-        time_context = (
-            "以下是系统提供的实时上下文，请当作事实使用：\n"
-            f"- 当前本地时间：{current_time_text}\n"
-            f"- 星期：{weekday_text}\n"
-            f"- 时区：{timezone_name}\n"
-            "当用户提到今天、明天、后天、现在、今晚、本周等相对时间时，"
-            "请以上述当前时间为准进行理解和回答。"
-        )
-
-    return f"{base_prompt}\n\n{time_context}"
-
-
 # ── WebSocket endpoint ────────────────────────────────────────────────────────
 @app.websocket("/ws/audio")
 async def audio_endpoint(websocket: WebSocket):
@@ -154,33 +119,13 @@ async def audio_endpoint(websocket: WebSocket):
     client = websocket.client
     logger.info("Client connected: %s", client)
 
-    session = Session()
+    # Per-connection state
+    ctx = RunContext(now=datetime.now(timezone.utc).astimezone())
     audio_buffer = io.BytesIO()
+    use_v2 = False  # protocol version flag
 
-    # ── Status callback ───────────────────────────────────────────────────────
-    # Called by ToolAgent the moment a tool starts executing.
-    # Sends STATUS:<msg> immediately so the client can play a "hold on" prompt
-    # without waiting for the full tool + LLM + TTS pipeline to finish.
-    async def send_status(msg: str) -> None:
-        try:
-            logger.info("[STATUS] %s", msg)
-            await websocket.send_text(f"STATUS:{msg}")
-            # Optional: synthesize and push a short status audio clip so the
-            # user hears voice feedback right away (requires TTS_STATUS_AUDIO=true).
-            if settings.TTS_STATUS_AUDIO:
-                try:
-                    async for chunk in tts.synthesize_stream(msg):
-                        if chunk:
-                            await websocket.send_bytes(chunk)
-                except Exception as exc:
-                    logger.warning("Status audio synthesis failed: %s", exc)
-                finally:
-                    try:
-                        await websocket.send_text("STATUS_AUDIO_DONE")
-                    except Exception:
-                        pass
-        except Exception:
-            pass  # Never let status delivery crash the main pipeline
+    # Build the multi-agent graph once per connection
+    root_agent = create_router_agent()
 
     try:
         while True:
@@ -192,7 +137,16 @@ async def audio_endpoint(websocket: WebSocket):
 
             # ── Text frame: control signal ────────────────────────────────
             elif "text" in message:
-                cmd = message["text"].strip().upper()
+                text = message["text"].strip()
+
+                # Protocol negotiation
+                if is_v2_handshake(text):
+                    use_v2 = True
+                    await websocket.send_text(json.dumps({"protocol": "v2", "status": "ok"}))
+                    logger.info("Client upgraded to protocol v2")
+                    continue
+
+                cmd = text.upper()
 
                 if cmd == "PING":
                     await websocket.send_text("PONG")
@@ -207,46 +161,26 @@ async def audio_endpoint(websocket: WebSocket):
                 audio_buffer = io.BytesIO()  # reset for next turn
 
                 if not raw_pcm:
-                    await websocket.send_text("EMPTY")
+                    if use_v2:
+                        await websocket.send_text(json.dumps({"event": "empty"}))
+                    else:
+                        await websocket.send_text("EMPTY")
                     continue
 
                 try:
-                    # 0. Optionally persist the raw audio for ASR analysis
-                    if settings.SAVE_UPLOAD_AUDIO:
-                        _save_audio(raw_pcm)
-
-                    # 1. ASR
-                    text = await asyncio.to_thread(asr.transcribe, raw_pcm)
-                    logger.info("[ASR] %s", text)
-
-                    if not text.strip():
-                        await websocket.send_text("EMPTY")
-                        continue
-
-                    await websocket.send_text(f"USER_TEXT:{text}")
-
-                    # 2. Agent: LLM intent detection + optional tool calls (non-blocking)
-                    session.add("user", text)
-                    agent = ToolAgent(llm_client=llm, status_cb=send_status)
-                    reply = await agent.run(session.messages())
-                    session.add("assistant", reply)
-                    logger.info("[LLM/Agent] %s", reply)
-                    await websocket.send_text(f"ASSISTANT_TEXT:{reply}")
-
-                    # 3. TTS + 4. Return audio (streaming)
-                    total_bytes = 0
-                    async for chunk in tts.synthesize_stream(reply):
-                        if not chunk:
-                            continue
-                        total_bytes += len(chunk)
-                        await websocket.send_bytes(chunk)
-                    logger.info("[TTS] streamed %d bytes", total_bytes)
-
-                    await websocket.send_text("DONE")
-
+                    await _run_pipeline(
+                        websocket=websocket,
+                        raw_pcm=raw_pcm,
+                        ctx=ctx,
+                        root_agent=root_agent,
+                        use_v2=use_v2,
+                    )
                 except Exception as exc:
                     logger.exception("Pipeline error")
-                    await websocket.send_text(f"ERROR:{exc}")
+                    if use_v2:
+                        await websocket.send_text(json.dumps({"event": "error", "message": str(exc)}))
+                    else:
+                        await websocket.send_text(f"ERROR:{exc}")
 
     except WebSocketDisconnect:
         logger.info("Client disconnected: %s", client)
@@ -254,6 +188,108 @@ async def audio_endpoint(websocket: WebSocket):
         logger.exception("Unexpected WebSocket error")
     finally:
         audio_buffer.close()
+
+
+async def _run_pipeline(
+    *,
+    websocket: WebSocket,
+    raw_pcm: bytes,
+    ctx: RunContext,
+    root_agent,
+    use_v2: bool,
+) -> None:
+    """Execute the full ASR → Agent → TTS pipeline for one utterance."""
+
+    # 0. Optionally persist the raw audio
+    if settings.SAVE_UPLOAD_AUDIO:
+        _save_audio(raw_pcm)
+
+    # 1. ASR
+    text = await asyncio.to_thread(asr.transcribe, raw_pcm)
+    logger.info("[ASR] %s", text)
+
+    if not text.strip():
+        if use_v2:
+            await websocket.send_text(json.dumps({"event": "empty"}))
+        else:
+            await websocket.send_text("EMPTY")
+        return
+
+    # Send user text
+    if use_v2:
+        await websocket.send_text(json.dumps({"event": "user_text", "text": text}))
+    else:
+        await websocket.send_text(f"USER_TEXT:{text}")
+
+    # 2. Agent: LLM intent detection + tool calls + handoffs
+    ctx.add_message("user", text)
+    ctx.now = datetime.now(timezone.utc).astimezone()  # refresh time each turn
+
+    # Set up event emitter → WebSocket bridge
+    emitter = EventEmitter()
+
+    async def _ws_event_listener(event: ev.Event) -> None:
+        """Push framework events to WebSocket in real-time."""
+        if use_v2:
+            frame = event_to_v2(event)
+            if frame:
+                await websocket.send_text(frame)
+        else:
+            # v1: only push STATUS messages
+            frame = event_to_v1(event)
+            if frame:
+                await websocket.send_text(frame)
+
+            # v1: synthesize status audio for StatusMessage events
+            if isinstance(event, ev.StatusMessage) and settings.TTS_STATUS_AUDIO:
+                try:
+                    async for chunk in tts.synthesize_stream(event.text):
+                        if chunk:
+                            await websocket.send_bytes(chunk)
+                except Exception as exc:
+                    logger.warning("Status audio synthesis failed: %s", exc)
+                finally:
+                    try:
+                        await websocket.send_text("STATUS_AUDIO_DONE")
+                    except Exception:
+                        pass
+
+    emitter.on(_ws_event_listener)
+
+    runner = Runner(
+        llm_client=llm,
+        emitter=emitter,
+        max_tool_rounds=settings.AGENT_MAX_TOOL_ROUNDS,
+        enable_tracing=settings.AGENT_ENABLE_TRACING,
+    )
+
+    result = await runner.run(root_agent, ctx)
+    reply = result.output
+
+    ctx.add_message("assistant", reply)
+    ctx.trim_history(settings.MAX_HISTORY_TURNS)
+
+    logger.info("[Agent] %s (via %s)", reply, result.agent_name)
+
+    # Send assistant text
+    if use_v2:
+        await websocket.send_text(json.dumps({"event": "assistant_text", "text": reply, "agent": result.agent_name}))
+    else:
+        await websocket.send_text(f"ASSISTANT_TEXT:{reply}")
+
+    # 3. TTS → stream audio
+    total_bytes = 0
+    async for chunk in tts.synthesize_stream(reply):
+        if not chunk:
+            continue
+        total_bytes += len(chunk)
+        await websocket.send_bytes(chunk)
+    logger.info("[TTS] streamed %d bytes", total_bytes)
+
+    if use_v2:
+        await websocket.send_text(json.dumps({"event": "audio_done"}))
+    else:
+        await websocket.send_text("DONE")
 
 # ── Web client (Vue SPA built with Vite) ─────────────────────────────────────
 _DIST = Path(__file__).parent.parent / "web_client" / "dist"

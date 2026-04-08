@@ -8,6 +8,11 @@ Zigbee2MQTT / Tuya SDK calls.
 
 import asyncio
 import logging
+from typing import Annotated, Literal
+
+from pydantic import Field
+
+from ..agent_framework import function_tool
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +27,17 @@ _DEVICE_STATE: dict[str, str] = {
 }
 
 
-async def control_smart_home(device: str, status: str) -> dict:
+@function_tool(
+    description=(
+        "控制智能家居设备的开关或状态。"
+        "当用户说'帮我开灯'、'关空调'、'把电视关掉'等时调用此工具。"
+    ),
+    status_message="正在控制设备...",
+)
+async def control_smart_home(
+    device: Annotated[str, Field(description="设备名称，例如 '客厅灯'、'空调'、'电视'、'窗帘'")],
+    status: Annotated[Literal["on", "off", "toggle"], Field(description="目标状态：on=打开, off=关闭, toggle=切换")],
+) -> dict:
     """
     Control a smart home device.
 

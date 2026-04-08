@@ -104,6 +104,7 @@ const conn = useConnection(WS_URL, {
   },
   onBinary(data) { playback.pushAudioData(data) },
   onText(msg)    { handleMessage(msg) },
+  onEvent(ev)    { handleEvent(ev) },
 })
 
 const { messages }   = chat
@@ -113,6 +114,7 @@ const { isRecording } = recorder
 /* ── Non-reactive orchestration state ──────────────────────────────────────── */
 let holdSource  = null
 let pendingMsgId = null
+let streamingAssistantId = null   // tracks the bubble being built by llm_token events
 
 /* ── UI helpers ────────────────────────────────────────────────────────────── */
 function setStatus(state, text) {
@@ -175,6 +177,115 @@ function handleMessage(msg) {
     processStatusText.value = ''
     playback.discardBuffers()
     if (pendingMsgId !== null) { chat.removeMessage(pendingMsgId); pendingMsgId = null }
+  }
+}
+
+/* ── v2 event routing ─────────────────────────────────────────────────────── */
+function handleEvent(ev) {
+  try {
+    switch (ev.event) {
+      case 'user_text': {
+        const txt = (ev.text || '').trim()
+        if (pendingMsgId !== null) {
+          chat.updateMessage(pendingMsgId, txt || '未识别到语音')
+          pendingMsgId = null
+        } else if (txt) {
+          chat.addMessage('user', txt)
+        }
+        break
+      }
+
+      case 'llm_token': {
+        // Progressive assistant text — build the bubble incrementally
+        const token = ev.token || ''
+        if (streamingAssistantId === null) {
+          playback.resetStatusAudio()
+          streamingAssistantId = chat.addMessage('assistant', token)
+        } else {
+          chat.appendMessage(streamingAssistantId, token)
+        }
+        break
+      }
+
+      case 'assistant_text': {
+        // Full assistant text (fallback if streaming was off)
+        playback.resetStatusAudio()
+        const txt = (ev.text || '').trim()
+        if (streamingAssistantId !== null) {
+          // Replace streamed content with final text
+          chat.updateMessage(streamingAssistantId, txt)
+          streamingAssistantId = null
+        } else if (txt) {
+          chat.addMessage('assistant', txt)
+        }
+        break
+      }
+
+      case 'status':
+        processStatusText.value = ev.text || ''
+        playback.beginStatusAudio()
+        break
+
+      case 'status_audio_done':
+        playback.endStatusAudio()
+        break
+
+      case 'tool_start':
+        processStatusText.value = ev.tool || '正在调用工具...'
+        break
+
+      case 'tool_end':
+        // processStatusText will be overwritten by next event
+        break
+
+      case 'agent_start':
+        log('[v2] agent_start: %s', ev.agent)
+        break
+
+      case 'agent_end':
+        log('[v2] agent_end: %s', ev.agent)
+        break
+
+      case 'handoff':
+        log('[v2] handoff → %s', ev.to_agent)
+        break
+
+      case 'empty':
+        _idle('未检测到语音，请重试')
+        processStatusText.value = ''
+        playback.discardBuffers()
+        if (pendingMsgId !== null) { chat.removeMessage(pendingMsgId); pendingMsgId = null }
+        streamingAssistantId = null
+        break
+
+      case 'done':
+      case 'audio_done':
+        _idle()
+        processStatusText.value = ''
+        playback.finishResponse()
+        streamingAssistantId = null
+        break
+
+      case 'error':
+        playback.resetStatusAudio()
+        _idle('出错了，请重试')
+        processStatusText.value = '处理失败'
+        chat.addMessage('info', '⚠️ ' + (ev.message || ev.text || '未知错误'))
+        playback.discardBuffers()
+        if (pendingMsgId !== null) { chat.removeMessage(pendingMsgId); pendingMsgId = null }
+        streamingAssistantId = null
+        break
+
+      default:
+        log('[v2] unknown event: %s', ev.event)
+    }
+  } catch (err) {
+    log('[v2] event handler error: %s', err)
+    _idle('出错了，请重试')
+    processStatusText.value = ''
+    playback.discardBuffers()
+    if (pendingMsgId !== null) { chat.removeMessage(pendingMsgId); pendingMsgId = null }
+    streamingAssistantId = null
   }
 }
 
