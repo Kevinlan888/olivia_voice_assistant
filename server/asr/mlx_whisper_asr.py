@@ -67,7 +67,7 @@ class MLXWhisperASR:
         )
 
         language = result.get("language", "unknown")
-        logger.info("Detected language: %s", language)
+        logger.info("Language: forced=%s, detected=%s", lang or "auto", language)
 
         text = result.get("text", "")
         return text.strip()
