@@ -3,8 +3,9 @@
 #   sudo apt install portaudio19-dev python3-dev
 pydantic-settings>=2.2.0
 pyaudio>=0.2.14
-openwakeword>=0.6.0    # offline wake-word detection (default model: alexa)
+pvporcupine>=3.0.0     # offline wake-word detection (Picovoice Porcupine)
 websockets>=12.0
 miniaudio>=1.55        # MP3 decoding (no audio device, no system deps)
 numpy>=1.24.0
+onnxruntime>=1.16.0       # Silero VAD neural-network inference
 gpiozero>=1.7.0        # optional, for push-to-talk button on Raspberry Pi

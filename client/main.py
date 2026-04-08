@@ -53,7 +53,7 @@ def _play_beep(player: AudioPlayer) -> None:
     ]
     raw_pcm = struct.pack(f"{num_samples}h", *samples)
 
-    pa = manager.fresh_pa()
+    pa = manager.get_pa()
     stream = pa.open(
         format=pyaudio.paInt16,
         channels=1,
@@ -126,9 +126,15 @@ async def run() -> None:
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     signal_handlers_registered = False
+
+    def _on_signal():
+        stop_event.set()
+        if detector:
+            detector.stop()
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, stop_event.set)
+            loop.add_signal_handler(sig, _on_signal)
             signal_handlers_registered = True
         except (NotImplementedError, RuntimeError):
             # RuntimeError can occur in non-main-thread contexts.
@@ -147,7 +153,14 @@ async def run() -> None:
                 if detector:
                     await asyncio.to_thread(detector.wait_for_wake_word)
 
-                # ── Step 2: Acknowledgement beep ─────────────────────────────
+                if stop_event.is_set():
+                    break
+
+                # ── Step 2: Pre-open mic, then play acknowledgement beep ──────
+                # Pre-opening before the beep lets PyAudio start buffering audio
+                # immediately.  record() will flush the frames captured during
+                # the beep, so the user's first syllable is never lost.
+                await asyncio.to_thread(recorder.pre_open_stream)
                 await asyncio.to_thread(_play_beep, player)
 
                 # ── Step 3: Record utterance ──────────────────────────────────

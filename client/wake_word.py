@@ -1,14 +1,22 @@
-"""Wake word detection using openWakeWord.
+"""Wake word detection using Porcupine (Picovoice).
 
-openWakeWord runs fully on-device and supports built-in pre-trained models
-such as "alexa", "hey jarvis", and others.
+Porcupine runs fully on-device and supports a set of built-in keywords:
+"alexa", "americano", "blueberry", "bumblebee", "computer", "grapefruit",
+"grasshopper", "hey google", "hey siri", "jarvis", "ok google", "picovoice",
+"porcupine", "terminator".
+
+Custom wake words (.ppn files) are also supported via WAKE_WORD_KEYWORD_PATH.
+
+Requires a free Picovoice access key — set PICOVOICE_ACCESS_KEY in .env.
 """
 
 import logging
+import os
+import sys
 import time
-import numpy as np
-import openwakeword
-from openwakeword.model import Model
+import struct
+import threading
+import pvporcupine
 import pyaudio
 
 from .audio_manager import manager
@@ -27,38 +35,51 @@ class WakeWordDetector:
     """
 
     def __init__(self):
+        access_key = settings.PICOVOICE_ACCESS_KEY.strip()
+        if not access_key:
+            raise ValueError("PICOVOICE_ACCESS_KEY must be set in .env to use wake word detection")
+
+        keyword_path = settings.WAKE_WORD_KEYWORD_PATH.strip() if settings.WAKE_WORD_KEYWORD_PATH else None
         keyword = settings.WAKE_WORD_KEYWORD.strip().lower()
-        if not keyword:
-            raise ValueError("WAKE_WORD_KEYWORD cannot be empty when wake-word is enabled")
 
-        # Ensure built-in model assets are present locally.
-        #openwakeword.utils.download_models()
+        if keyword_path:
+            # Resolve relative paths against PyInstaller bundle dir when frozen.
+            if not os.path.isabs(keyword_path) and getattr(sys, "frozen", False):
+                keyword_path = os.path.join(sys._MEIPASS, keyword_path)
+            # Custom .ppn model file
+            self._porcupine = pvporcupine.create(
+                access_key=access_key,
+                keyword_paths=[keyword_path],
+                sensitivities=[settings.WAKE_WORD_THRESHOLD],
+            )
+            label = keyword_path
+        else:
+            # Built-in keyword
+            if not keyword:
+                raise ValueError("WAKE_WORD_KEYWORD cannot be empty when wake-word is enabled")
+            self._porcupine = pvporcupine.create(
+                access_key=access_key,
+                keywords=[keyword],
+                sensitivities=[settings.WAKE_WORD_THRESHOLD],
+            )
+            label = keyword
 
-        self._model_name = keyword
-        self._threshold = settings.WAKE_WORD_THRESHOLD
-        self._required_hits = max(1, int(settings.WAKE_WORD_CONSECUTIVE_HITS))
         self._cooldown_seconds = max(0.0, float(settings.WAKE_WORD_COOLDOWN_SECONDS))
-        self._model = Model()
-        self._sample_rate = 16000
-        self._frame_length = 1280  # 80 ms at 16 kHz (recommended by openWakeWord)
+        self._sample_rate = self._porcupine.sample_rate      # always 16000
+        self._frame_length = self._porcupine.frame_length    # always 512
 
         self._stream = None
+        self._stop_event = threading.Event()
         self._open_stream()
         logger.info(
-            "Wake word detector ready: model='%s', threshold=%.2f hits=%d cooldown=%.1fs",
-            self._model_name,
-            self._threshold,
-            self._required_hits,
+            "Wake word detector ready (Porcupine): keyword='%s', sensitivity=%.2f, cooldown=%.1fs",
+            label,
+            settings.WAKE_WORD_THRESHOLD,
             self._cooldown_seconds,
         )
 
     def _open_stream(self) -> None:
-        """Open the PyAudio capture stream via the global AudioManager.
-
-        Using manager.fresh_pa() ensures we always have a valid PyAudio
-        instance, even after PortAudio re-initialisation, which would leave
-        a cached instance stale (-9997 Invalid sample rate).
-        """
+        """Open the PyAudio capture stream via the global AudioManager."""
         pa = manager.fresh_pa()
         self._stream = pa.open(
             rate=self._sample_rate,
@@ -83,29 +104,21 @@ class WakeWordDetector:
         if self._stream is None:
             self._open_stream()
 
-        self._model.reset()  # reset model state to avoid false positives from old audio
-        
+        # Discard stale audio that accumulated while we were away
         frames_to_discard = self._stream.get_read_available()
         if frames_to_discard > 0:
-            # exception_on_overflow=False 确保即使溢出了也不会崩溃
             self._stream.read(frames_to_discard, exception_on_overflow=False)
-            print(f"已丢弃 {frames_to_discard} 帧陈旧音频数据")
+            logger.debug("Discarded %d stale frames", frames_to_discard)
 
         logger.info("Listening for wake word …")
-        hits = 0
-        while True:
+        while not self._stop_event.is_set():
             pcm_bytes = self._stream.read(self._frame_length, exception_on_overflow=False)
-            pcm = np.frombuffer(pcm_bytes, dtype=np.int16)
-            scores = self._model.predict(pcm)
-            score = float(scores.get(self._model_name, 0.0))
+            # Porcupine expects a list/tuple of int16 samples
+            pcm = struct.unpack_from(f"{self._frame_length}h", pcm_bytes)
+            result = self._porcupine.process(pcm)
 
-            if score >= self._threshold:
-                hits += 1
-            else:
-                hits = 0
-
-            if hits >= self._required_hits:
-                logger.info("Wake word detected! model='%s' score=%.3f", self._model_name, score)
+            if result >= 0:
+                logger.info("Wake word detected! (keyword index %d)", result)
 
                 if self._cooldown_seconds > 0:
                     time.sleep(self._cooldown_seconds)
@@ -114,5 +127,13 @@ class WakeWordDetector:
                 self._close_stream()
                 return
 
+    def stop(self) -> None:
+        """Signal the wake-word loop to exit (thread-safe)."""
+        self._stop_event.set()
+
     def close(self) -> None:
+        self._stop_event.set()
         self._close_stream()
+        if self._porcupine is not None:
+            self._porcupine.delete()
+            self._porcupine = None
