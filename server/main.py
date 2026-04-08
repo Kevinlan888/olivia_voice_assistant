@@ -57,6 +57,7 @@ from .agent_framework import events as ev
 from .agent_framework.sentence_splitter import SentenceSplitter
 from .agents import create_router_agent
 from .protocol import event_to_v1, event_to_v2, is_v2_handshake
+from . import storage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -82,6 +83,28 @@ def _save_audio(raw_pcm: bytes) -> None:
         logger.warning("[SAVE_AUDIO] Failed to save audio: %s", exc)
 
 
+async def _try_resume_session(text: str, ctx: RunContext) -> bool:
+    """If *text* is a ``{"resume_session": "<id>"}`` JSON frame, restore the
+    session into *ctx* and return True.  Otherwise return False."""
+    if not settings.ENABLE_PERSISTENCE:
+        return False
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    sid = data.get("resume_session")
+    if not sid:
+        return False
+    session = await storage.load_session(sid)
+    if not session:
+        logger.warning("[Resume] session %s not found", sid)
+        return False
+    ctx.session_id = session["session_id"]
+    ctx.summary = session["summary"]
+    ctx.history = session["messages"]
+    return True
+
+
 # ── Component singletons (initialised once at startup) ────────────────────────
 asr: WhisperASR
 llm: OpenAILLM | OllamaLLM
@@ -100,9 +123,13 @@ async def lifespan(app: FastAPI):
     logger.info(f"TTS provider: {settings.TTS_PROVIDER}")
     tts = await asyncio.to_thread(EdgeTTSEngine if settings.TTS_PROVIDER == "edge" else SovitsTTS)
 
+    if settings.ENABLE_PERSISTENCE:
+        await storage.init_db(settings.DB_PATH)
+
     logger.info("Olivia server ready.")
     yield
     logger.info("Server shutting down.")
+    await storage.close_db()
 
 
 app = FastAPI(title="Olivia Voice Assistant", lifespan=lifespan)
@@ -127,6 +154,10 @@ async def audio_endpoint(websocket: WebSocket):
     audio_buffer = io.BytesIO()
     use_v2 = False  # protocol version flag
 
+    # Persist session
+    if settings.ENABLE_PERSISTENCE:
+        await storage.create_session(ctx.session_id)
+
     # Build the multi-agent graph once per connection
     root_agent = create_router_agent()
 
@@ -147,6 +178,16 @@ async def audio_endpoint(websocket: WebSocket):
                     use_v2 = True
                     await websocket.send_text(json.dumps({"protocol": "v2", "status": "ok"}))
                     logger.info("Client upgraded to protocol v2")
+                    continue
+
+                # Resume a previous session
+                resumed = await _try_resume_session(text, ctx)
+                if resumed:
+                    await websocket.send_text(json.dumps({
+                        "event": "session_resumed",
+                        "session_id": ctx.session_id,
+                    }))
+                    logger.info("Resumed session %s", ctx.session_id)
                     continue
 
                 cmd = text.upper()
@@ -228,6 +269,9 @@ async def _run_pipeline(
     ctx.add_message("user", text)
     ctx.now = datetime.now(timezone.utc).astimezone()  # refresh time each turn
 
+    if settings.ENABLE_PERSISTENCE:
+        await storage.save_message(ctx.session_id, "user", text)
+
     # Set up event emitter → WebSocket bridge
     emitter = EventEmitter()
 
@@ -275,6 +319,11 @@ async def _run_pipeline(
         llm,
         enable_summary=settings.ENABLE_CONTEXT_SUMMARY,
     )
+
+    if settings.ENABLE_PERSISTENCE:
+        await storage.save_message(ctx.session_id, "assistant", reply)
+        if ctx.summary:
+            await storage.save_summary(ctx.session_id, ctx.summary)
 
     logger.info("[Agent] %s (via %s)", reply, result.agent_name)
 

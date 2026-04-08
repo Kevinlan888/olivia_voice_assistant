@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     MAX_CONTEXT_TOKENS: int = 8192
     ENABLE_CONTEXT_SUMMARY: bool = True
 
+    # ── Persistence ──────────────────────────────────────────────────────
+    ENABLE_PERSISTENCE: bool = True
+    DB_PATH: str = "data/conversations.db"
+
     # ── Search ───────────────────────────────────────────────────────────────
     SERPAPI_KEY: str = ""
     SERPAPI_ENGINE: str = "google"
