@@ -49,7 +49,8 @@ class Settings(BaseSettings):
         "If the user's question involves relative time expressions (today, tomorrow, now, etc.), "
         "use the current time provided by the system context."
     )
-    MAX_HISTORY_TURNS: int = 10
+    MAX_CONTEXT_TOKENS: int = 8192
+    ENABLE_CONTEXT_SUMMARY: bool = True
 
     # ── Search ───────────────────────────────────────────────────────────────
     SERPAPI_KEY: str = ""

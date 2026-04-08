@@ -270,7 +270,11 @@ async def _run_pipeline(
     reply = result.output
 
     ctx.add_message("assistant", reply)
-    ctx.trim_history(settings.MAX_HISTORY_TURNS)
+    await ctx.compact(
+        settings.MAX_CONTEXT_TOKENS,
+        llm,
+        enable_summary=settings.ENABLE_CONTEXT_SUMMARY,
+    )
 
     logger.info("[Agent] %s (via %s)", reply, result.agent_name)
 
