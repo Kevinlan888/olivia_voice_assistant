@@ -7,4 +7,5 @@ pvporcupine>=3.0.0     # offline wake-word detection (Picovoice Porcupine)
 websockets>=12.0
 miniaudio>=1.55        # MP3 decoding (no audio device, no system deps)
 numpy>=1.24.0
+onnxruntime>=1.16.0    # Silero VAD inference (lightweight, has ARM/Pi wheels)
 gpiozero>=1.7.0        # optional, for push-to-talk button on Raspberry Pi

@@ -1,14 +1,4 @@
-import os
-import sys
 from pydantic_settings import BaseSettings
-
-
-def _env_file_path() -> str:
-    """Resolve .env path for both normal runs and PyInstaller bundles."""
-    if getattr(sys, "frozen", False):
-        # PyInstaller extracts --add-data files into sys._MEIPASS
-        return os.path.join(sys._MEIPASS, ".env")
-    return ".env"
 
 
 class ClientSettings(BaseSettings):
@@ -32,9 +22,8 @@ class ClientSettings(BaseSettings):
     SAMPLE_RATE: int = 16000
     CHANNELS: int = 1
     CHUNK_FRAMES: int = 512             # frames per PyAudio buffer read
-    # Silence detection (adaptive noise gate)
-    SILENCE_CALIBRATION_FRAMES: int = 10  # frames to sample noise floor at start
-    SILENCE_SPEECH_MULTIPLIER: float = 1.5  # RMS > noise_floor * multiplier = speech
+    # Silero VAD (neural-network based voice activity detection)
+    VAD_THRESHOLD: float = 0.5          # speech probability threshold (0.0–1.0)
     SILENCE_SECONDS: float = 0.8        # silence duration before stopping recording
     MIN_RECORDING_SECONDS: float = 2.0  # minimum recording duration before VAD can stop
     MAX_RECORDING_SECONDS: float = 15.0 # hard cap per utterance
@@ -51,7 +40,7 @@ class ClientSettings(BaseSettings):
     STREAM_PLAYBACK: bool = True         # play assistant audio progressively
 
     class Config:
-        env_file = _env_file_path()
+        env_file = ".env"
         extra = "ignore"
 
 

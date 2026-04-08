@@ -1,62 +1,147 @@
 """
-Microphone recorder with energy-based Voice Activity Detection (VAD).
+Microphone recorder with Silero Voice Activity Detection (VAD).
+
+Uses a lightweight ONNX neural-network model for robust speech detection,
+far more accurate than energy-based approaches in noisy environments.
+Runs on ONNX Runtime — no PyTorch needed, works great on Raspberry Pi.
 
 Records until a configurable period of silence or a maximum duration,
 then returns the raw PCM bytes (int16, 16 kHz, mono).
 """
 
 import logging
+import urllib.request
+from pathlib import Path
+
 import pyaudio
 import numpy as np
+import onnxruntime
 
 from .audio_manager import manager
 from .config import settings
 
 logger = logging.getLogger(__name__)
 
+_SILERO_VAD_URL = (
+    "https://github.com/snakers4/silero-vad/raw/master/"
+    "src/silero_vad/data/silero_vad.onnx"
+)
 
-def _rms(chunk_bytes: bytes) -> float:
-    """Root-mean-square energy of a raw int16 PCM chunk (numpy, no GIL pressure)."""
-    samples = np.frombuffer(chunk_bytes, dtype=np.int16)
-    if samples.size == 0:
-        return 0.0
-    return float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+
+# ── Silero VAD (ONNX) singleton ─────────────────────────────────────────
+class _SileroVAD:
+    """Thin wrapper around the Silero VAD ONNX model."""
+
+    def __init__(self, model_path: Path):
+        opts = onnxruntime.SessionOptions()
+        opts.inter_op_num_threads = 1
+        opts.intra_op_num_threads = 1
+        self._sess = onnxruntime.InferenceSession(
+            str(model_path), sess_options=opts,
+            providers=["CPUExecutionProvider"],
+        )
+        # Detect model version from input names (v5 uses "state", v4 uses "h"/"c")
+        input_names = {inp.name for inp in self._sess.get_inputs()}
+        if "state" in input_names:
+            self._version = 5
+            self._state_shape = (2, 1, 128)
+        else:
+            self._version = 4
+            self._state_shape = (2, 1, 64)
+        self.reset_states()
+        logger.info("Silero VAD ONNX model loaded (v%d)", self._version)
+
+    def reset_states(self) -> None:
+        if self._version == 5:
+            self._state = np.zeros(self._state_shape, dtype=np.float32)
+        else:
+            self._h = np.zeros(self._state_shape, dtype=np.float32)
+            self._c = np.zeros(self._state_shape, dtype=np.float32)
+
+    def __call__(self, audio: np.ndarray, sample_rate: int) -> float:
+        """Return speech probability (0.0–1.0) for a float32 audio chunk."""
+        audio_2d = audio.reshape(1, -1).astype(np.float32)
+        sr = np.array([sample_rate], dtype=np.int64)
+
+        if self._version == 5:
+            out, state_n = self._sess.run(
+                ["output", "stateN"],
+                {"input": audio_2d, "state": self._state, "sr": sr},
+            )
+            self._state = state_n
+        else:
+            out, hn, cn = self._sess.run(
+                ["output", "hn", "cn"],
+                {"input": audio_2d, "h": self._h, "c": self._c, "sr": sr},
+            )
+            self._h = hn
+            self._c = cn
+
+        return float(out.squeeze())
+
+
+_vad_model: _SileroVAD | None = None
+
+
+def _ensure_model_file() -> Path:
+    """Download the Silero VAD ONNX model if not cached."""
+    cache_dir = Path.home() / ".cache" / "silero-vad"
+    model_path = cache_dir / "silero_vad.onnx"
+    if not model_path.exists():
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Downloading Silero VAD ONNX model …")
+        urllib.request.urlretrieve(_SILERO_VAD_URL, model_path)
+        logger.info("Saved to %s", model_path)
+    return model_path
+
+
+def _load_vad_model() -> _SileroVAD:
+    """Load and cache the Silero VAD ONNX model."""
+    global _vad_model
+    if _vad_model is None:
+        _vad_model = _SileroVAD(_ensure_model_file())
+    return _vad_model
+
+
+def _speech_prob(chunk_bytes: bytes, sample_rate: int) -> float:
+    """Return speech probability (0.0–1.0) for a raw int16 PCM chunk."""
+    samples = np.frombuffer(chunk_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    return _load_vad_model()(samples, sample_rate)
 
 
 class AudioRecorder:
     """Capture one utterance from the microphone and return PCM bytes.
 
-    Uses simple energy-based VAD:
+    Uses Silero VAD (neural-network based):
       - Recording starts immediately.
-      - After the user stops speaking (RMS stays below SILENCE_THRESHOLD
-        for SILENCE_SECONDS), recording stops automatically.
+      - After the user stops speaking (speech probability stays below
+        VAD_THRESHOLD for SILENCE_SECONDS), recording stops automatically.
       - Hard capped at MAX_RECORDING_SECONDS.
     """
 
     def __init__(self):
         self._rate = settings.SAMPLE_RATE
         self._chunk = settings.CHUNK_FRAMES
-        self._calibration_frames = max(3, settings.SILENCE_CALIBRATION_FRAMES)
-        self._speech_multiplier = max(1.1, settings.SILENCE_SPEECH_MULTIPLIER)
+        self._vad_threshold = settings.VAD_THRESHOLD
         self._silence_limit = int(settings.SILENCE_SECONDS * self._rate / self._chunk)
         self._min_chunks = int(settings.MIN_RECORDING_SECONDS * self._rate / self._chunk)
         self._max_chunks = int(settings.MAX_RECORDING_SECONDS * self._rate / self._chunk)
         self._pre_stream = None
-        self._threshold: float | None = None   # set by pre_open_stream calibration
+        # Pre-load VAD model so the first recording doesn't stall
+        _load_vad_model()
         logger.info(
-            "AudioRecorder ready: rate=%d calibration_frames=%d speech_mult=%.1f",
-            self._rate, self._calibration_frames, self._speech_multiplier,
+            "AudioRecorder ready: rate=%d vad_threshold=%.2f silence=%.1fs",
+            self._rate, self._vad_threshold, settings.SILENCE_SECONDS,
         )
 
     def pre_open_stream(self) -> None:
-        """Open the mic stream AND calibrate the noise floor before the beep.
+        """Open the mic stream before the beep.
 
-        Call this BEFORE playing the acknowledgement beep.  The environment is
-        still quiet at this point, so the calibration reads a true ambient
-        noise floor — uncontaminated by the beep's acoustic echo.
+        Call this BEFORE playing the acknowledgement beep so there is no
+        latency when record() starts consuming frames.
 
-        record() will reuse the already-open stream, flush the frames captured
-        during the beep, and skip calibration.
+        record() will reuse the already-open stream and flush frames
+        captured during the beep.
         """
         if self._pre_stream is not None:
             return  # already open
@@ -68,20 +153,13 @@ class AudioRecorder:
             input=True,
             frames_per_buffer=self._chunk,
         )
-        # ── Calibrate noise floor NOW (environment is quiet) ──────────────
-        cal_rms_values = []
-        for _ in range(self._calibration_frames):
-            chunk = self._pre_stream.read(self._chunk, exception_on_overflow=False)
-            cal_rms_values.append(_rms(chunk))
-        noise_floor = max(float(np.median(cal_rms_values)), 50.0)
-        self._threshold = noise_floor * self._speech_multiplier
-        logger.info(
-            "Pre-beep calibration: noise_floor=%.0f → threshold=%.0f",
-            noise_floor, self._threshold,
-        )
+        logger.info("Pre-opened mic stream")
 
     def record(self) -> bytes:
-        """Open the mic, record one utterance with VAD, return raw PCM bytes."""
+        """Open the mic, record one utterance with Silero VAD, return raw PCM bytes."""
+        # Reset VAD internal states for a fresh utterance
+        _load_vad_model().reset_states()
+
         if self._pre_stream is not None:
             stream = self._pre_stream
             self._pre_stream = None
@@ -105,22 +183,6 @@ class AudioRecorder:
             for _ in range(_flush):
                 stream.read(self._chunk, exception_on_overflow=False)
 
-        # ── Determine speech threshold ─────────────────────────────────────
-        # If pre_open_stream() already calibrated (before the beep), reuse it.
-        # Otherwise fall back to inline calibration (no pre-open path).
-        if self._threshold is not None:
-            threshold = self._threshold
-            self._threshold = None          # consume; recalibrate next time
-            logger.info("Using pre-beep threshold=%.0f", threshold)
-        else:
-            cal_rms = []
-            for _ in range(self._calibration_frames):
-                chunk = stream.read(self._chunk, exception_on_overflow=False)
-                cal_rms.append(_rms(chunk))
-            noise_floor = max(float(np.median(cal_rms)), 50.0)
-            threshold = noise_floor * self._speech_multiplier
-            logger.info("Inline calibration: noise_floor=%.0f → threshold=%.0f", noise_floor, threshold)
-
         logger.info("Recording … (speak now)")
 
         frames: list[bytes] = []
@@ -134,9 +196,9 @@ class AudioRecorder:
                 frames.append(chunk)
                 total_chunks += 1
 
-                rms = _rms(chunk)
+                prob = _speech_prob(chunk, self._rate)
 
-                if rms < threshold:
+                if prob < self._vad_threshold:
                     silent_chunks += 1
                 else:
                     silent_chunks = 0
@@ -145,7 +207,7 @@ class AudioRecorder:
                 # Stop on sustained silence — but only after speech was detected
                 # and the minimum recording duration has elapsed.
                 if speech_detected and total_chunks >= self._min_chunks and silent_chunks >= self._silence_limit:
-                    logger.info("Silence detected — stopping recording.")
+                    logger.info("Silence detected (Silero VAD, prob=%.2f) — stopping recording.", prob)
                     if silent_chunks <= len(frames):
                         frames = frames[: len(frames) - silent_chunks]
                     break
