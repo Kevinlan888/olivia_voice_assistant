@@ -18,10 +18,20 @@ export function useChat(chatElRef) {
     if (m) m.text = text
   }
 
+  function appendMessage(id, text) {
+    const m = messages.value.find(m => m.id === id)
+    if (m) {
+      m.text += text
+      nextTick(() => {
+        if (chatElRef.value) chatElRef.value.scrollTop = chatElRef.value.scrollHeight
+      })
+    }
+  }
+
   function removeMessage(id) {
     const i = messages.value.findIndex(m => m.id === id)
     if (i !== -1) messages.value.splice(i, 1)
   }
 
-  return { messages, addMessage, updateMessage, removeMessage }
+  return { messages, addMessage, updateMessage, appendMessage, removeMessage }
 }

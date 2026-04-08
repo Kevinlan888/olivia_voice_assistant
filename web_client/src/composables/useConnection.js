@@ -10,11 +10,13 @@ const PING_INTERVAL   = 20000  // ms between keep-alive pings
  * @param {Object} handlers
  * @param {Function} handlers.onOpen
  * @param {Function} handlers.onClose
- * @param {Function} handlers.onBinary - called with ArrayBuffer
- * @param {Function} handlers.onText   - called with string
+ * @param {Function} handlers.onBinary  - called with ArrayBuffer
+ * @param {Function} handlers.onText    - called with string (v1 plain-text frames)
+ * @param {Function} [handlers.onEvent] - called with parsed JSON event object (v2)
  */
 export function useConnection(url, handlers) {
   const wsReady = ref(false)
+  const useV2   = ref(false)
 
   let ws                  = null
   let _connectAttempt     = 0
@@ -63,6 +65,15 @@ export function useConnection(url, handlers) {
       const elapsed = (performance.now() - _connectAt).toFixed(0)
       log('[WS] onopen  attempt #%d  elapsed=%sms', _connectAttempt, elapsed)
       wsReady.value = true
+
+      // Attempt v2 protocol upgrade
+      try {
+        ws.send(JSON.stringify({ protocol: 'v2' }))
+        log('[WS] sent v2 handshake')
+      } catch (e) {
+        log('[WS] v2 handshake send failed: %s', e)
+      }
+
       handlers.onOpen?.()
     }
 
@@ -71,6 +82,7 @@ export function useConnection(url, handlers) {
       log('[WS] onclose  code=%d  reason=%s  wasClean=%s',
           evt.code, evt.reason || '(none)', evt.wasClean)
       wsReady.value = false
+      useV2.value = false
       handlers.onClose?.()
       _reconnectTimeoutId = setTimeout(connect, RECONNECT_DELAY)
     }
@@ -83,9 +95,35 @@ export function useConnection(url, handlers) {
     ws.onmessage = (evt) => {
       if (evt.data instanceof ArrayBuffer) {
         handlers.onBinary?.(evt.data)
-      } else {
-        handlers.onText?.(evt.data)
+        return
       }
+
+      const msg = evt.data
+
+      // Try parsing as JSON (v2 event or v2 handshake ack)
+      if (msg.startsWith('{')) {
+        try {
+          const data = JSON.parse(msg)
+
+          // v2 handshake acknowledgement
+          if (data.protocol === 'v2' && data.status === 'ok') {
+            useV2.value = true
+            log('[WS] v2 protocol confirmed')
+            return
+          }
+
+          // v2 event
+          if (data.event && handlers.onEvent) {
+            handlers.onEvent(data)
+            return
+          }
+        } catch {
+          // Not JSON — fall through to v1 handler
+        }
+      }
+
+      // v1 plain-text frame
+      handlers.onText?.(msg)
     }
 
     if (_pingIntervalId === null) {
@@ -135,7 +173,7 @@ export function useConnection(url, handlers) {
   }
 
   return {
-    wsReady, connect, send, isOpen, destroy,
+    wsReady, useV2, connect, send, isOpen, destroy,
     onVisibilityChange, onPageShow, onPageHide, onOnline, onOffline,
   }
 }

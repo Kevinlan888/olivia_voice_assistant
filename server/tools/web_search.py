@@ -1,8 +1,12 @@
 """web_search tool implementation powered by SerpAPI."""
 
 import logging
-import httpx
+from typing import Annotated
 
+import httpx
+from pydantic import Field
+
+from ..agent_framework import function_tool
 from ..config import settings
 
 logger = logging.getLogger(__name__)
@@ -14,7 +18,16 @@ _HTTP = httpx.AsyncClient(
 _SERPAPI_URL = "https://serpapi.com/search.json"
 
 
-async def web_search(query: str) -> dict:
+@function_tool(
+    description=(
+        "在互联网上搜索最新信息。当问题需要实时数据、新闻、"
+        "价格、赛事结果等训练数据截止日期之后的内容时调用此工具。"
+    ),
+    status_message="正在联网搜索...",
+)
+async def web_search(
+    query: Annotated[str, Field(description="搜索关键词或自然语言查询")],
+) -> dict:
     """
     Search the web for *query* and return a brief summary.
 

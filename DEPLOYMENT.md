@@ -20,36 +20,45 @@
 ### 核心特性
 
 - **ASR（语音识别）**：Faster-Whisper（离线）
-- **LLM（大语言模型）**：OpenAI API / Ollama 本地模型
-- **TTS（文字转语音）**：Edge-TTS / GPT-SoVITS
+- **LLM（大语言模型）**：OpenAI API / Ollama 本地模型（流式输出）
+- **TTS（文字转语音）**：Edge-TTS / GPT-SoVITS（流式音频）
 - **VAD（语音活动检测）**：Silero VAD（神经网络，ONNX 推理）
 - **唤醒词**：Porcupine（Picovoice 离线唤醒词检测）
-- **工具调用**：天气查询、网络搜索、智能家居控制（Function Calling）
-- **前端**：Vue 3 单页应用（支持手机/PC浏览器）
+- **Multi-Agent 框架**：自研轻量框架（参考 OpenAI Agents SDK），Router + 专项 Agent
+- **工具调用**：`@function_tool` 装饰器自动生成 JSON Schema（天气、搜索、智能家居）
+- **Guardrails**：输入/输出安全检查框架
+- **Tracing**：Span-based 调用链追踪
+- **双协议**：v1（纯文本）/ v2（JSON 事件），自动协商
+- **前端**：Vue 3 单页应用（支持手机/PC浏览器，v2 流式 token 逐字显示）
 
 ### 架构流程
 
 ```
 ┌─────────────┐
 │   客户端     │ (树莓派 Python 或 网页浏览器)
-│  麦克风      │
+│  麦克风      │   v2 协议: JSON 事件 + 流式 token
 └──────┬──────┘
        │ PCM 音频流 (WebSocket)
        ↓
-┌──────────────────────────────┐
-│     服务端 (Linux/Docker)     │
-│  ┌──────────┐                │
-│  │ ASR      │ Whisper        │
-│  └────┬─────┘                │
-│       │ 文本                 │
-│  ┌────↓──────────┐           │
-│  │ LLM + Agent   │ 工具调用  │
-│  └────┬──────────┘           │
-│       │ 回复文本             │
-│  ┌────↓─────┐                │
-│  │ TTS       │ MP3 流        │
-│  └────┬──────┘                │
-└───────┼────────────────────────┘
+┌──────────────────────────────────────┐
+│     服务端 (Linux/Docker)             │
+│  ┌──────────┐                        │
+│  │ ASR      │ Whisper                │
+│  └────┬─────┘                        │
+│       │ 文本                         │
+│  ┌────↓──────────────────────────┐   │
+│  │ Multi-Agent Router            │   │
+│  │  ├─ Weather Agent (天气)      │   │
+│  │  ├─ Smart Home Agent (家居)   │   │
+│  │  ├─ Search Agent (搜索)       │   │
+│  │  └─ 直接回复 (闲聊)           │   │
+│  │  EventEmitter → WS 实时推送   │   │
+│  └────┬──────────────────────────┘   │
+│       │ 回复文本                     │
+│  ┌────↓─────┐                        │
+│  │ TTS       │ MP3 流                │
+│  └────┬──────┘                        │
+└───────┼──────────────────────────────┘
         │ MP3 音频 (WebSocket)
         ↓
 ┌──────────────┐
@@ -273,6 +282,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 项目代码
 COPY server ./server
 COPY web_client/dist ./web_client/dist
+
+# 确保 agent_framework 和 agents 包被复制
+# (已包含在 server/ 目录中)
 
 # 非 root 用户
 RUN useradd -m -u 1000 olivia && chown -R olivia:olivia /app

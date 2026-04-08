@@ -5,8 +5,8 @@ from typing import Literal
 class Settings(BaseSettings):
     # ── ASR ──────────────────────────────────────────────────────────────────
     WHISPER_MODEL: str = "base"          # tiny / base / small / medium / large-v3
-    WHISPER_DEVICE: str = "cpu"          # cpu / cuda
-    WHISPER_COMPUTE_TYPE: str = "int8"   # int8 / float16 / float32
+    WHISPER_DEVICE: str = "cpu"          # cpu / cuda / mlx
+    WHISPER_COMPUTE_TYPE: str = "int8"   # int8 / float16 / float32 (ignored for mlx)
 
     WHISPER_LANGUAGE: str = "zh"         # zh / en / ja / … or "auto" for auto-detect
 
@@ -49,7 +49,13 @@ class Settings(BaseSettings):
         "If the user's question involves relative time expressions (today, tomorrow, now, etc.), "
         "use the current time provided by the system context."
     )
-    MAX_HISTORY_TURNS: int = 10
+    MAX_CONTEXT_TOKENS: int = 8192
+    ENABLE_CONTEXT_SUMMARY: bool = True
+
+    # ── Persistence ──────────────────────────────────────────────────────
+    ENABLE_PERSISTENCE: bool = True
+    DB_PATH: str = "data/conversations.db"
+    SESSION_TIMEOUT_MINUTES: int = 30
 
     # ── Search ───────────────────────────────────────────────────────────────
     SERPAPI_KEY: str = ""
@@ -64,6 +70,12 @@ class Settings(BaseSettings):
     # SAVE_UPLOAD_AUDIO_DIR for later ASR analysis / debugging.
     SAVE_UPLOAD_AUDIO: bool = False
     SAVE_UPLOAD_AUDIO_DIR: str = "audio_logs"
+
+    # ── Agent framework ───────────────────────────────────────────────────────
+    AGENT_MAX_TOOL_ROUNDS: int = 5
+    AGENT_ENABLE_TRACING: bool = True
+    LLM_STREAMING: bool = True
+
     class Config:
         env_file = ".env"
         extra = "ignore"
