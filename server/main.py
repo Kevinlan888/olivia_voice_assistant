@@ -297,10 +297,58 @@ async def _run_pipeline(
         emitter=emitter,
         max_tool_rounds=settings.AGENT_MAX_TOOL_ROUNDS,
         enable_tracing=settings.AGENT_ENABLE_TRACING,
+        streaming=settings.LLM_STREAMING,
     )
 
-    result = await runner.run(root_agent, ctx)
-    reply = result.output
+    # ── Streaming pipeline: LLM tokens → sentence split → TTS → audio ──
+    splitter = SentenceSplitter()
+    reply_parts: list[str] = []
+    total_bytes = 0
+    reply = ""
+    agent_name = ""
+
+    # Queue of sentences ready for TTS synthesis
+    tts_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def _tts_consumer() -> int:
+        """Pull sentences from the queue, synthesize, and send audio."""
+        sent = 0
+        while True:
+            sentence = await tts_queue.get()
+            if sentence is None:
+                break
+            try:
+                async for chunk in tts.synthesize_stream(sentence):
+                    if chunk:
+                        sent += len(chunk)
+                        await websocket.send_bytes(chunk)
+            except Exception as exc:
+                logger.warning("[TTS] synthesis failed for sentence: %s", exc)
+        return sent
+
+    # Start TTS consumer in background
+    tts_task = asyncio.create_task(_tts_consumer())
+
+    async for event in runner.run_stream(root_agent, ctx):
+        if isinstance(event, ev.LLMTokenDelta):
+            reply_parts.append(event.token)
+            for sentence in splitter.feed(event.token):
+                await tts_queue.put(sentence)
+        elif isinstance(event, ev.AgentEnd):
+            reply = event.output
+            agent_name = event.agent_name
+
+    # Flush remaining text in the splitter
+    for sentence in splitter.flush():
+        await tts_queue.put(sentence)
+
+    # If no tokens were streamed (e.g. non-streaming mode, guardrail
+    # rejection), synthesize the full reply now.
+    if not reply_parts and reply:
+        await tts_queue.put(reply)
+
+    await tts_queue.put(None)  # signal TTS consumer to stop
+    total_bytes = await tts_task
 
     ctx.add_message("assistant", reply)
     await ctx.compact(
@@ -314,21 +362,15 @@ async def _run_pipeline(
         if ctx.summary:
             await storage.save_summary(ctx.session_id, ctx.summary)
 
-    logger.info("[Agent] %s (via %s)", reply, result.agent_name)
+    logger.info("[Agent] %s (via %s)", reply, agent_name)
 
     # Send assistant text
     if use_v2:
-        await websocket.send_text(json.dumps({"event": "assistant_text", "text": reply, "agent": result.agent_name}))
+        await websocket.send_text(json.dumps({"event": "assistant_text", "text": reply, "agent": agent_name}))
     else:
         await websocket.send_text(f"ASSISTANT_TEXT:{reply}")
 
-    # 3. TTS → stream audio
-    total_bytes = 0
-    async for chunk in tts.synthesize_stream(reply):
-        if not chunk:
-            continue
-        total_bytes += len(chunk)
-        await websocket.send_bytes(chunk)
+    # TTS audio was already streamed progressively above
     logger.info("[TTS] streamed %d bytes", total_bytes)
 
     if use_v2:

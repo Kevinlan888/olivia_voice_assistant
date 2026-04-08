@@ -71,11 +71,13 @@ class Runner:
         emitter: EventEmitter | None = None,
         max_tool_rounds: int = MAX_TOOL_ROUNDS,
         enable_tracing: bool = True,
+        streaming: bool = True,
     ):
         self._llm = llm_client
         self._emitter = emitter or EventEmitter()
         self._max_rounds = max_tool_rounds
         self._enable_tracing = enable_tracing
+        self._streaming = streaming
 
     # ── Public: non-streaming run ─────────────────────────────────────────
 
@@ -173,10 +175,7 @@ class Runner:
             t0 = time.time()
             await self._emitter.emit(LLMStart(model=current_agent.model))
 
-            # If LLM supports streaming and this is the last reply (no tools),
-            # we could stream. For now use non-streaming for tool-call rounds.
-            # Streaming is handled in run_stream() for the final reply.
-            response = await self._llm.generate_with_tools(msgs, tool_defs)
+            response = await self._call_llm(msgs, tool_defs)
 
             duration = (time.time() - t0) * 1000
             await self._emitter.emit(LLMEnd(
@@ -353,6 +352,36 @@ class Runner:
                 ))
                 return result.reject_message or "抱歉，无法回答这个问题。"
         return None
+
+    # ── LLM call (streaming or non-streaming) ───────────────────────────
+
+    async def _call_llm(self, msgs: list[dict], tool_defs: list[dict]) -> dict:
+        """Call the LLM, optionally streaming tokens.
+
+        When streaming is enabled, each text token is emitted as an
+        ``LLMTokenDelta`` event so that downstream consumers (e.g. sentence
+        splitter → TTS) can start processing before the full reply arrives.
+
+        Returns the same ``{"content": ..., "tool_calls": ...}`` dict
+        regardless of whether streaming was used.
+        """
+        if not self._streaming:
+            return await self._llm.generate_with_tools(msgs, tool_defs)
+
+        content_parts: list[str] = []
+        tool_calls: list[dict] | None = None
+
+        async for delta in self._llm.generate_with_tools_stream(msgs, tool_defs):
+            if delta.token:
+                content_parts.append(delta.token)
+                await self._emitter.emit(LLMTokenDelta(token=delta.token))
+            if delta.tool_calls_delta:
+                tool_calls = delta.tool_calls_delta
+
+        return {
+            "content": "".join(content_parts),
+            "tool_calls": tool_calls,
+        }
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
