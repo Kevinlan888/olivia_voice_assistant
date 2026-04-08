@@ -5,8 +5,8 @@ from typing import Literal
 class Settings(BaseSettings):
     # ── ASR ──────────────────────────────────────────────────────────────────
     WHISPER_MODEL: str = "base"          # tiny / base / small / medium / large-v3
-    WHISPER_DEVICE: str = "cpu"          # cpu / cuda
-    WHISPER_COMPUTE_TYPE: str = "int8"   # int8 / float16 / float32
+    WHISPER_DEVICE: str = "cpu"          # cpu / cuda / mlx
+    WHISPER_COMPUTE_TYPE: str = "int8"   # int8 / float16 / float32 (ignored for mlx)
 
     WHISPER_LANGUAGE: str = "zh"         # zh / en / ja / … or "auto" for auto-detect
 

@@ -44,7 +44,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import settings
-from .asr.whisper_asr import WhisperASR
+if settings.WHISPER_DEVICE == "mlx":
+    from .asr.mlx_whisper_asr import MLXWhisperASR as WhisperASR
+else:
+    from .asr.whisper_asr import WhisperASR
 from .llm.openai_llm import OpenAILLM
 from .llm.ollama_llm import OllamaLLM
 from .tts.edge_tts_engine import EdgeTTSEngine
