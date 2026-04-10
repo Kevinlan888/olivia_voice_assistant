@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     DB_PATH: str = "data/conversations.db"
     SESSION_TIMEOUT_MINUTES: int = 30
 
+    # ── Weather ───────────────────────────────────────────────────────────────
+    # 高德地图 Web 服务 API Key，用于天气查询
+    AMAP_KEY: str = ""
+
     # ── Search ───────────────────────────────────────────────────────────────
     SERPAPI_KEY: str = ""
     SERPAPI_ENGINE: str = "google"
