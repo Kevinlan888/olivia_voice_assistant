@@ -139,6 +139,92 @@ class AudioRecorder:
         logger.info("Recorded %d chunks (%.1fs)", total_chunks, total_chunks * self._chunk / self._rate)
         return b"".join(frames)
 
+    def record_streaming(self, on_speech_chunk) -> bytes:
+        """Record one utterance with VAD, forwarding each chunk via *on_speech_chunk*
+        as soon as speech is detected.
+
+        *on_speech_chunk* is called **synchronously from this thread** with each
+        raw PCM chunk (bytes) once speech activity begins.  Silent frames captured
+        before speech starts are buffered locally and never forwarded, so the
+        server only receives meaningful audio.
+
+        Returns the complete raw PCM bytes (identical to :meth:`record`).
+        The caller should use the returned bytes only as a fallback; normally
+        all audio has already been streamed to the server by the time this
+        method returns.
+        """
+        if self._pre_stream is not None:
+            stream = self._pre_stream
+            self._pre_stream = None
+            stale = stream.get_read_available()
+            if stale > 0:
+                stream.read(stale, exception_on_overflow=False)
+                logger.debug("Flushed %d stale frames from pre-open stream", stale)
+        else:
+            pa = manager.get_pa()
+            stream = pa.open(
+                format=pyaudio.paInt16,
+                channels=settings.CHANNELS,
+                rate=self._rate,
+                input=True,
+                frames_per_buffer=self._chunk,
+            )
+            _flush = int(0.1 * self._rate / self._chunk)
+            for _ in range(_flush):
+                stream.read(self._chunk, exception_on_overflow=False)
+
+        self._vad.reset()
+
+        logger.info("Recording (streaming) … (speak now, Silero VAD thr=%.2f)", self._speech_threshold)
+
+        frames: list[bytes] = []
+        silent_chunks = 0
+        total_chunks = 0
+        speech_detected = False
+        log_interval = max(1, int(0.5 * self._rate / self._chunk))
+
+        try:
+            while total_chunks < self._max_chunks:
+                chunk = stream.read(self._chunk, exception_on_overflow=False)
+                frames.append(chunk)
+                total_chunks += 1
+
+                prob = self._vad(chunk)
+
+                if prob >= self._speech_threshold:
+                    speech_detected = True
+                    silent_chunks = 0
+                elif speech_detected and prob < self._neg_threshold:
+                    silent_chunks += 1
+                elif speech_detected:
+                    pass
+
+                # Forward chunk to server as soon as speech has started.
+                # This runs while the mic is still recording, hiding upload
+                # latency so the server can begin ASR the moment END arrives.
+                if speech_detected:
+                    on_speech_chunk(chunk)
+
+                if total_chunks % log_interval == 0:
+                    logger.debug(
+                        "chunk=%d prob=%.3f speech=%s silent_run=%d/%d",
+                        total_chunks, prob, speech_detected, silent_chunks, self._silence_limit,
+                    )
+
+                if (speech_detected
+                        and total_chunks >= self._min_chunks
+                        and silent_chunks >= self._silence_limit):
+                    logger.info("Silence detected — stopping recording.")
+                    if silent_chunks <= len(frames):
+                        frames = frames[: len(frames) - silent_chunks]
+                    break
+        finally:
+            stream.stop_stream()
+            stream.close()
+
+        logger.info("Recorded %d chunks (%.1fs)", total_chunks, total_chunks * self._chunk / self._rate)
+        return b"".join(frames)
+
     def record_ptt(self, button) -> bytes:
         """Record while the PTT button is held; stop when released.
 
