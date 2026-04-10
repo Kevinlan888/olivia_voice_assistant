@@ -185,6 +185,34 @@ class WSClient:
         else:
             return await self._collect_v1()
 
+    async def send_audio_chunk(self, chunk: bytes) -> None:
+        """Send a single raw PCM chunk during a streaming upload.
+
+        Called repeatedly while the microphone is still recording so that
+        upload and recording proceed concurrently.  Must be followed by a
+        call to :meth:`finish_upload` once recording is complete.
+        """
+        if not self._is_connected():
+            await self.connect()
+        await self._ws.send(chunk)
+
+    async def finish_upload(self) -> bytes | None:
+        """Signal end of audio and collect the server response.
+
+        Call this after all chunks have been forwarded via
+        :meth:`send_audio_chunk`.  Sends the END sentinel and then waits
+        for the server's TTS audio reply, exactly like :meth:`process_audio`.
+
+        Returns:
+            MP3 bytes on success, or None if the server returned EMPTY/ERROR.
+        """
+        await self._ws.send("END")
+        logger.info("Sent END (streaming upload complete), waiting for response …")
+        if self._use_v2:
+            return await self._collect_v2()
+        else:
+            return await self._collect_v1()
+
     # ── v2 response collection ────────────────────────────────────────────────
 
     async def _collect_v2(self) -> bytes | None:

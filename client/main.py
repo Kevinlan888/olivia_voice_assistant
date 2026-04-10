@@ -163,15 +163,37 @@ async def run() -> None:
                 await asyncio.to_thread(recorder.pre_open_stream)
                 await asyncio.to_thread(_play_beep, player)
 
-                # ── Step 3: Record utterance ──────────────────────────────────
-                raw_pcm = await asyncio.to_thread(recorder.record)
+                # ── Step 3: Record utterance with concurrent upload ───────────
+                # Ensure the WebSocket is open before the recording thread
+                # starts firing on_speech_chunk callbacks.
+                if not ws._is_connected():
+                    await ws.connect()
+
+                def _on_speech_chunk(chunk: bytes) -> None:
+                    """Called from the recorder thread for each chunk once speech
+                    starts.  Submits an async send to the event loop and blocks
+                    until it completes so chunks arrive in order."""
+                    fut = asyncio.run_coroutine_threadsafe(
+                        ws.send_audio_chunk(chunk), loop
+                    )
+                    try:
+                        fut.result(timeout=1.0)
+                    except Exception as exc:
+                        logger.warning("Failed to send audio chunk: %s", exc)
+
+                raw_pcm = await asyncio.to_thread(recorder.record_streaming, _on_speech_chunk)
             if not raw_pcm:
                 continue
 
-            # ── Step 4: Send to server, get TTS audio ────────────────────────
+            # ── Step 4: Finish upload and collect server response ─────────────
+            # PTT path: audio was not streamed, send it now via process_audio.
+            # Wake-word path: chunks were already uploaded; just send END.
             if settings.STREAM_PLAYBACK:
                 await asyncio.to_thread(player.start_stream)
-            audio_response = await ws.process_audio(raw_pcm)
+            if ptt:
+                audio_response = await ws.process_audio(raw_pcm)
+            else:
+                audio_response = await ws.finish_upload()
             if settings.STREAM_PLAYBACK:
                 await asyncio.to_thread(player.stop_stream, True)
 
