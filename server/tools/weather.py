@@ -69,7 +69,7 @@ async def get_weather(
         return {
             "city": city,
             "error": "无法解析城市编码",
-            "description": f"无法识别城市"{city}"，请确认城市名称是否正确。",
+            "description": f'无法识别城市"{city}"，请确认城市名称是否正确。',
         }
 
     try:
