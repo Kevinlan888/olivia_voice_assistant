@@ -32,7 +32,7 @@ _DEVICE_STATE: dict[str, str] = {
         "控制智能家居设备的开关或状态。"
         "当用户说'帮我开灯'、'关空调'、'把电视关掉'等时调用此工具。"
     ),
-    status_message="正在控制设备...",
+    status_message="tool.smart_home.status",
 )
 async def control_smart_home(
     device: Annotated[str, Field(description="设备名称，例如 '客厅灯'、'空调'、'电视'、'窗帘'")],

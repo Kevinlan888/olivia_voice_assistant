@@ -5,6 +5,7 @@ import logging
 import numpy as np
 
 from ..config import settings
+from ..language import lang as lang_mgr
 
 logger = logging.getLogger(__name__)
 
@@ -58,16 +59,16 @@ class MLXWhisperASR:
 
         audio_np = self._pcm_to_float32(raw_pcm)
 
-        lang = None if settings.WHISPER_LANGUAGE == "auto" else settings.WHISPER_LANGUAGE
+        whisper_lang = lang_mgr.whisper_lang
         result = mlx_whisper.transcribe(
             audio_np,
             path_or_hf_repo=self._repo,
-            language=lang,
+            language=whisper_lang,
             verbose=False,
         )
 
         language = result.get("language", "unknown")
-        logger.info("Language: forced=%s, detected=%s", lang or "auto", language)
+        logger.info("Language: forced=%s, detected=%s", whisper_lang or "auto", language)
 
         text = result.get("text", "")
         return text.strip()

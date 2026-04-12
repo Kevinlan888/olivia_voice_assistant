@@ -43,7 +43,7 @@ async def _get_adcode(city: str) -> str | None:
         "以及未来三天的天气预报（白天/夜晚天气、最高/最低温度）。"
         "当用户询问天气、是否需要带伞、今天热不热、本周天气等问题时调用此工具。"
     ),
-    status_message="正在查询天气...",
+    status_message="tool.weather.status",
 )
 async def get_weather(
     city: Annotated[str, Field(description="城市名称，例如 '北京'、'上海'、'深圳'")],

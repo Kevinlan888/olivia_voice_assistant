@@ -8,6 +8,7 @@ from pydantic import Field
 
 from ..agent_framework import function_tool
 from ..config import settings
+from ..language import lang
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ _SERPAPI_URL = "https://serpapi.com/search.json"
         "在互联网上搜索最新信息。当问题需要实时数据、新闻、"
         "价格、赛事结果等训练数据截止日期之后的内容时调用此工具。"
     ),
-    status_message="正在联网搜索...",
+    status_message="tool.web_search.status",
 )
 async def web_search(
     query: Annotated[str, Field(description="搜索关键词或自然语言查询")],
@@ -43,13 +44,13 @@ async def web_search(
             "description": "未配置 SERPAPI_KEY，无法进行联网搜索。",
         }
 
-    is_english = settings.WHISPER_LANGUAGE.lower() in ("en", "english")
+    is_english = lang.is_english
     params = {
         "q": query,
         "api_key": api_key,
         "engine": settings.SERPAPI_ENGINE,
-        "hl": "en" if is_english else "zh-cn",
-        "gl": "us" if is_english else "cn",
+        "hl": lang.serpapi_hl,
+        "gl": lang.serpapi_gl,
     }
 
     try:

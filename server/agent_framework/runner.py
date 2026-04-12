@@ -257,7 +257,8 @@ class Runner:
                 seen.add(name)
                 tool = agent.get_tool(name)
                 if tool and tool.status_message:
-                    await self._emitter.emit(StatusMessage(text=tool.status_message))
+                    status_text = tool.get_status_message()
+                    await self._emitter.emit(StatusMessage(text=status_text))
 
         async def _run_one(tc: dict) -> dict:
             name = tc["function"]["name"]
