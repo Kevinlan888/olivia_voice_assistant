@@ -2,12 +2,12 @@
 
 from ..agent_framework import Agent
 from ..agent_framework.context import RunContext
-from ..language import tr
+from ..language import lang
 from ..tools import web_search
 
 
 def _search_instructions(ctx: RunContext) -> str:
-    return tr("agent.search.instructions")
+    return lang.agent_instructions("agent.search.instructions")
 
 
 search_agent = Agent(

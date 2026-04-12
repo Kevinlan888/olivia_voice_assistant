@@ -141,6 +141,18 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "zh": "将对话转交给 {agent} 处理。当你认为 {agent} 更适合回答当前问题时调用此工具。",
         "en": "Hand off the conversation to the {agent} agent when it is better suited to answer.",
     },
+    "handoff.weather.description": {
+        "zh": "转交给天气查询助手，处理天气、温度、降水等问题。",
+        "en": "Hand off to the weather agent for weather, temperature, and forecast questions.",
+    },
+    "handoff.smart_home.description": {
+        "zh": "转交给智能家居助手，控制灯、空调、电视等设备。",
+        "en": "Hand off to the smart home agent to control lights, AC, TV, and other devices.",
+    },
+    "handoff.search.description": {
+        "zh": "转交给联网搜索助手，搜索实时新闻、价格、赛事等信息。",
+        "en": "Hand off to the search agent for real-time information like news, prices, or events.",
+    },
 
     # ── Runner internals ──────────────────────────────────────────────────────
     "runner.max_rounds_fallback": {
@@ -150,6 +162,15 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     "runner.max_rounds_default_reply": {
         "zh": "处理完成。",
         "en": "Done.",
+    },
+
+    # ── Language enforcement suffix ──────────────────────────────────────────
+    "agent.language_enforcement": {
+        "zh": "无论工具返回的数据是什么语言，你的回复必须用中文。",
+        "en": (
+            "IMPORTANT: Always reply in English, regardless of the language returned "
+            "by any tool. Translate tool results into English before responding."
+        ),
     },
 
     # ── Context summary ───────────────────────────────────────────────────────
@@ -218,6 +239,10 @@ class LanguageManager:
         return text.format_map(fmt) if fmt else text
 
     # ── SerpAPI locale ────────────────────────────────────────────────────────
+
+    def agent_instructions(self, base_key: str) -> str:
+        """Return agent instructions with the language-enforcement suffix appended."""
+        return self.tr(base_key) + " " + self.tr("agent.language_enforcement")
 
     @property
     def serpapi_hl(self) -> str:

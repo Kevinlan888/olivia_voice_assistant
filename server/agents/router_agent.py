@@ -35,7 +35,7 @@ def _build_router_instructions(ctx: RunContext) -> str:
     )
     routing_instructions = tr("router.routing_instructions")
 
-    return f"{base_prompt}\n\n{time_context}{routing_instructions}"
+    return f"{base_prompt}\n\n{time_context}{routing_instructions}\n\n{tr('agent.language_enforcement')}"
 
 
 def create_router_agent() -> Agent:
@@ -46,15 +46,15 @@ def create_router_agent() -> Agent:
         handoffs=[
             Handoff(
                 target_agent=weather_agent,
-                description="转交给天气查询助手，处理天气、温度、降水等问题。",
+                description=tr("handoff.weather.description"),
             ),
             Handoff(
                 target_agent=smart_home_agent,
-                description="转交给智能家居助手，控制灯、空调、电视等设备。",
+                description=tr("handoff.smart_home.description"),
             ),
             Handoff(
                 target_agent=search_agent,
-                description="转交给联网搜索助手，搜索实时新闻、价格、赛事等信息。",
+                description=tr("handoff.search.description"),
             ),
         ],
     )
