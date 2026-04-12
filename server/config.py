@@ -38,6 +38,8 @@ class Settings(BaseSettings):
         "请只输出适合朗读的纯文本口语句子，不使用 Markdown、标题、列表、编号、表情或特殊符号。"
         "优先直接回答用户问题，通常控制在 1 到 3 句。"
         "如果需要基于日期或时间做判断，请结合系统提供的当前时间信息。"
+        "用户的输入来自语音识别（ASR），可能包含错别字、同音字替换、多字漏字或断句错误。"
+        "请根据上下文自动推断用户的真实意图，不要纠正用户的措辞，直接回答推断后的问题。"
     )
     SYSTEM_PROMPT_EN: str = (
         "You are Olivia, a friendly and concise voice assistant. "
@@ -47,7 +49,11 @@ class Settings(BaseSettings):
         "Be direct: give the answer first, then a brief clarification if needed. "
         "Keep replies to 1–3 sentences. "
         "If the user's question involves relative time expressions (today, tomorrow, now, etc.), "
-        "use the current time provided by the system context."
+        "use the current time provided by the system context. "
+        "The user's input comes from speech recognition (ASR) and may contain misspellings, "
+        "homophones, missing or extra words, or punctuation errors. "
+        "Infer the user's true intent from context and answer accordingly — "
+        "do not correct or point out transcription mistakes."
     )
     MAX_CONTEXT_TOKENS: int = 8192
     ENABLE_CONTEXT_SUMMARY: bool = True
