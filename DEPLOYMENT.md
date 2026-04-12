@@ -436,6 +436,7 @@ pyinstaller --onefile run_client.py \
   --name olivia-client \
   --add-data ".env:." \
   --add-data "client/models:client/models" \
+  --add-data "client/audios:client/audios" \
   --collect-all pvporcupine \
   --collect-data miniaudio \
   --hidden-import _cffi_backend
