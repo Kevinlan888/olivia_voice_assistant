@@ -165,15 +165,7 @@ async def run() -> None:
                 if stop_event.is_set():
                     break
 
-                # ── Step 2: Pre-open mic, then play acknowledgement beep ──────
-                # Pre-opening before the beep lets PyAudio start buffering audio
-                # immediately.  record() will flush the frames captured during
-                # the beep, so the user's first syllable is never lost.
-                await asyncio.to_thread(recorder.pre_open_stream)
-                await asyncio.to_thread(_play_beep, player)
-
-                # ── Step 3: Record utterance with concurrent upload ───────────
-                # Ensure the WebSocket is open before the recording thread
+                # ── Step 2: Play acknowledgement beep concurrently with recording ────
                 # starts firing on_speech_chunk callbacks.
                 if not ws._is_connected():
                     await ws.connect()
@@ -190,7 +182,10 @@ async def run() -> None:
                     except Exception as exc:
                         logger.warning("Failed to send audio chunk: %s", exc)
 
+                beep_task = asyncio.create_task(asyncio.to_thread(_play_beep, player))
+                
                 raw_pcm = await asyncio.to_thread(recorder.record_streaming, _on_speech_chunk)
+                await beep_task
             if not raw_pcm:
                 continue
 

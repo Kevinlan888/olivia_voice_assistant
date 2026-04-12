@@ -33,104 +33,32 @@ class AudioRecorder:
         self._silence_limit = int(settings.SILENCE_SECONDS * self._rate / self._chunk)
         self._min_chunks = int(settings.MIN_RECORDING_SECONDS * self._rate / self._chunk)
         self._max_chunks = int(settings.MAX_RECORDING_SECONDS * self._rate / self._chunk)
-        self._pre_stream = None
-        self._pre_frames = []
-        self._pre_thread = None
-        self._pre_stop = False
         self._vad = SileroVAD(sample_rate=self._rate)
         logger.info(
             "AudioRecorder ready: rate=%d chunk=%d speech_thr=%.2f neg_thr=%.2f silence_chunks=%d",
             self._rate, self._chunk, self._speech_threshold, self._neg_threshold, self._silence_limit,
         )
 
-    def _pre_worker(self):
-        """Read frames in background while the beep plays."""
-        while not self._pre_stop and self._pre_stream:
-            try:
-                frame = self._pre_stream.read(self._chunk, exception_on_overflow=False)
-                self._pre_frames.append(frame)
-                # Keep maximum 2 seconds of buffered audio to prevent boundless memory growth
-                if len(self._pre_frames) > 2 * self._rate / self._chunk:
-                    self._pre_frames.pop(0)
-            except Exception:
-                break
-
-    def pre_open_stream(self) -> None:
-        """Open the mic stream before the beep so it's ready for recording.
-
-        Call this BEFORE playing the acknowledgement beep.  record() will reuse
-        the already-open stream and use the frames captured during the beep.
-        No calibration is needed — Silero VAD handles speech detection directly.
-        """
-        if self._pre_stream is not None:
-            return  # already open
+    def record(self) -> bytes:
+        """Open the mic, record one utterance with Silero VAD, return raw PCM bytes."""
         pa = manager.get_pa()
-        self._pre_stream = pa.open(
+        stream = pa.open(
             format=pyaudio.paInt16,
             channels=settings.CHANNELS,
             rate=self._rate,
             input=True,
             frames_per_buffer=self._chunk,
         )
-        self._pre_frames = []
-        self._pre_stop = False
-        import threading
-        self._pre_thread = threading.Thread(target=self._pre_worker, daemon=True)
-        self._pre_thread.start()
-        logger.debug("Pre-opened mic stream for recording.")
-
-    def record(self) -> bytes:
-        """Open the mic, record one utterance with Silero VAD, return raw PCM bytes."""
-        if self._pre_stream is not None:
-            self._pre_stop = True
-            if self._pre_thread:
-                self._pre_thread.join()
-            stream = self._pre_stream
-            self._pre_stream = None
-            self._pre_thread = None
-            
-            stale = stream.get_read_available()
-            if stale > 0:
-                frame = stream.read(stale, exception_on_overflow=False)
-                for i in range(0, len(frame), self._chunk * 2):
-                    chunk_slice = frame[i:i + self._chunk * 2]
-                    if len(chunk_slice) == self._chunk * 2:
-                        self._pre_frames.append(chunk_slice)
-            logger.debug("Used %d buffered frames from pre-open stream", len(self._pre_frames))
-        else:
-            pa = manager.get_pa()
-            stream = pa.open(
-                format=pyaudio.paInt16,
-                channels=settings.CHANNELS,
-                rate=self._rate,
-                input=True,
-                frames_per_buffer=self._chunk,
-            )
-            # Discard frames buffered during stream open (~100 ms).
-            _flush = int(0.1 * self._rate / self._chunk)
-            for _ in range(_flush):
-                stream.read(self._chunk, exception_on_overflow=False)
 
         # Reset VAD state for a fresh utterance
         self._vad.reset()
 
         logger.info("Recording … (speak now, Silero VAD thr=%.2f)", self._speech_threshold)
 
-        frames: list[bytes] = list(self._pre_frames)
-        self._pre_frames = []
-        
+        frames: list[bytes] = []
         silent_chunks = 0
-        total_chunks = len(frames)
+        total_chunks = 0
         speech_detected = False
-        
-        # If we pre-buffered frames, run them through VAD now
-        for frame in frames:
-            prob = self._vad(frame)
-            if prob >= self._speech_threshold:
-                speech_detected = True
-                silent_chunks = 0
-            elif speech_detected and prob < self._neg_threshold:
-                silent_chunks += 1
 
         log_interval = max(1, int(0.5 * self._rate / self._chunk))  # ~0.5s
 
@@ -192,54 +120,24 @@ class AudioRecorder:
         all audio has already been streamed to the server by the time this
         method returns.
         """
-        if self._pre_stream is not None:
-            self._pre_stop = True
-            if self._pre_thread:
-                self._pre_thread.join()
-            stream = self._pre_stream
-            self._pre_stream = None
-            self._pre_thread = None
-            
-            stale = stream.get_read_available()
-            if stale > 0:
-                frame = stream.read(stale, exception_on_overflow=False)
-                for i in range(0, len(frame), self._chunk * 2):
-                    chunk_slice = frame[i:i + self._chunk * 2]
-                    if len(chunk_slice) == self._chunk * 2:
-                        self._pre_frames.append(chunk_slice)
-            logger.debug("Used %d buffered frames from pre-open stream", len(self._pre_frames))
-        else:
-            pa = manager.get_pa()
-            stream = pa.open(
-                format=pyaudio.paInt16,
-                channels=settings.CHANNELS,
-                rate=self._rate,
-                input=True,
-                frames_per_buffer=self._chunk,
-            )
+        pa = manager.get_pa()
+        stream = pa.open(
+            format=pyaudio.paInt16,
+            channels=settings.CHANNELS,
+            rate=self._rate,
+            input=True,
+            frames_per_buffer=self._chunk,
+        )
 
         self._vad.reset()
 
         logger.info("Recording (streaming) … (speak now, Silero VAD thr=%.2f)", self._speech_threshold)
 
-        frames: list[bytes] = list(self._pre_frames)
-        self._pre_frames = []
+        frames: list[bytes] = []
         silent_chunks = 0
-        total_chunks = len(frames)
+        total_chunks = 0
         speech_detected = False
         log_interval = max(1, int(0.5 * self._rate / self._chunk))
-
-        # Fast-forward VAD state using pre-buffered frames
-        for frame in frames:
-            prob = self._vad(frame)
-            if prob >= self._speech_threshold:
-                if not speech_detected:
-                    speech_detected = True
-                    for f in frames:
-                        on_speech_chunk(f)
-                silent_chunks = 0
-            elif speech_detected and prob < self._neg_threshold:
-                silent_chunks += 1
 
 
         try:
@@ -251,19 +149,17 @@ class AudioRecorder:
                 prob = self._vad(chunk)
 
                 if prob >= self._speech_threshold:
-                    if not speech_detected:
-                        speech_detected = True
-                        silent_chunks = 0
-                        # Speech just started! Forward ALL locally buffered frames first
-                        for f in frames:
-                            on_speech_chunk(f)
-                    else:
-                        silent_chunks = 0
-                        on_speech_chunk(chunk)
+                    speech_detected = True
+                    silent_chunks = 0
                 elif speech_detected and prob < self._neg_threshold:
                     silent_chunks += 1
-                    on_speech_chunk(chunk)
                 elif speech_detected:
+                    pass
+
+                # Forward chunk to server as soon as speech has started.
+                # This runs while the mic is still recording, hiding upload
+                # latency so the server can begin ASR the moment END arrives.
+                if speech_detected:
                     on_speech_chunk(chunk)
 
                 if total_chunks % log_interval == 0:
@@ -325,17 +221,4 @@ class AudioRecorder:
         return b"".join(frames)
 
     def close(self) -> None:
-        if self._pre_stream is not None:
-            self._pre_stop = True
-            try:
-                self._pre_stream.stop_stream()
-                self._pre_stream.close()
-            except Exception:
-                pass
-            if self._pre_thread:
-                try:
-                    self._pre_thread.join()
-                except Exception:
-                    pass
-            self._pre_stream = None
-            self._pre_thread = None
+        pass
