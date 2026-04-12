@@ -176,6 +176,7 @@ class Runner:
             t0 = time.time()
             await self._emitter.emit(LLMStart(model=current_agent.model))
 
+            logger.info("[Runner] calling LLM, msg: %s", msgs[-1] if msgs else "[]")
             response = await self._call_llm(msgs, tool_defs)
 
             duration = (time.time() - t0) * 1000
