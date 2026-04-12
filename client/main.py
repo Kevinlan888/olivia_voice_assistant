@@ -111,6 +111,8 @@ async def run() -> None:
     async def on_audio_chunk(mp3_chunk: bytes) -> None:
         """Queue assistant audio chunk for progressive playback."""
         if settings.STREAM_PLAYBACK:
+            if not player.is_streaming:
+                await asyncio.to_thread(player.start_stream)
             await asyncio.to_thread(player.feed_stream_chunk, mp3_chunk)
 
     ws = WSClient(
@@ -195,8 +197,6 @@ async def run() -> None:
             # ── Step 4: Finish upload and collect server response ─────────────
             # PTT path: audio was not streamed, send it now via process_audio.
             # Wake-word path: chunks were already uploaded; just send END.
-            if settings.STREAM_PLAYBACK:
-                await asyncio.to_thread(player.start_stream)
             if ptt:
                 audio_response = await ws.process_audio(raw_pcm)
             else:
