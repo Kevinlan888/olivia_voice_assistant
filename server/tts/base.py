@@ -1,8 +1,5 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-import logging
-
-logger = logging.getLogger(__name__)
 
 class BaseTTS(ABC):
     @abstractmethod
@@ -11,7 +8,6 @@ class BaseTTS(ABC):
 
     async def synthesize(self, text: str) -> bytes:
         """Convert text to a single audio blob by collecting stream chunks."""
-        logger.info("[BaseTTS] synthesizing text: %r", text)
         chunks: list[bytes] = []
         async for chunk in self.synthesize_stream(text):
             if chunk:

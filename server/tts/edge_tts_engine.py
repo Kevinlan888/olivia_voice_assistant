@@ -29,6 +29,7 @@ class EdgeTTSEngine(BaseTTS):
 
     async def synthesize(self, text: str) -> bytes:
         """Convert text to MP3 bytes using Edge TTS."""
+        logger.info("[EdgeTTSEngine] synthesizing text: %r", text)
         buf = io.BytesIO()
         async for chunk in self.synthesize_stream(text):
             buf.write(chunk)
