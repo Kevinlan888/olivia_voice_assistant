@@ -222,6 +222,7 @@ class WSClient:
         try:
             async for message in self._ws:
                 if isinstance(message, bytes):
+                    logger.info("Received audio chunk (%d bytes)", len(message))
                     audio_buf.write(message)
                     if self._on_audio_chunk:
                         await self._on_audio_chunk(message)
