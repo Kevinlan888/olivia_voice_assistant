@@ -94,10 +94,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
             "the day after tomorrow, now, tonight, or this week, interpret and answer "
             "based on the current time above."
         ),
-# Defines the language fallback sequence used when a translation key does not
-# exist for the current language. The order is intentional: try English first
-# as the primary default content language, then Chinese as a secondary fallback
-# so missing translations still resolve predictably across supported locales.
+    },
 }
 
 # Fallback order when the exact language code is not found in an entry
