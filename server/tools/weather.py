@@ -24,6 +24,7 @@ _AMAP_BASE = "https://restapi.amap.com/v3"
 async def _get_adcode(city: str) -> str | None:
     """Resolve a city name to its Amap adcode via the geocoding API."""
     try:
+        logger.info("[tool:get_weather] geocoding city %r", city)
         resp = await _HTTP.get(
             f"{_AMAP_BASE}/geocode/geo",
             params={"address": city, "key": settings.AMAP_KEY},

@@ -29,9 +29,9 @@ class Handoff:
 
     def as_tool_definition(self) -> dict:
         """Generate an OpenAI-format tool definition for the handoff."""
-        desc = self.description or (
-            f"将对话转交给 {self.target_agent.name} 处理。"
-            f"当你认为 {self.target_agent.name} 更适合回答当前问题时调用此工具。"
+        from ..language import tr
+        desc = self.description or tr(
+            "handoff.default_description", agent=self.target_agent.name
         )
         return {
             "type": "function",

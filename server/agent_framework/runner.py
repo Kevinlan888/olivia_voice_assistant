@@ -36,6 +36,7 @@ from .events import (
 from .guardrail import GuardrailResult
 from .tool import FunctionTool
 from .tracing import LogTraceExporter, TraceCollector
+from ..language import tr
 
 logger = logging.getLogger(__name__)
 
@@ -234,10 +235,10 @@ class Runner:
         logger.warning("[Runner] hit max rounds (%d), requesting summary", self._max_rounds)
         msgs.append({
             "role": "user",
-            "content": "请根据以上工具调用结果，给我一个简洁的中文语音回复。",
+            "content": tr("runner.max_rounds_fallback"),
         })
         response = await self._llm.generate_with_tools(msgs, [])
-        reply = (response.get("content") or "处理完成。").strip()
+        reply = (response.get("content") or tr("runner.max_rounds_default_reply")).strip()
         await self._emitter.emit(AgentEnd(agent_name=current_agent.name, output=reply))
         return RunResult(output=reply, agent_name=current_agent.name, context=ctx)
 
