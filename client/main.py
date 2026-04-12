@@ -15,6 +15,7 @@ import asyncio
 import logging
 import signal
 import sys
+from pathlib import Path
 
 from .config import settings
 from .audio_manager import manager
@@ -31,37 +32,36 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _play_beep(player: AudioPlayer) -> None:
-    """Play a short 880 Hz beep to signal readiness via PyAudio (no pygame needed).
+_WAKEUP_MP3 = Path(__file__).parent / "audios" / "wakeup.mp3"
+_PENDING_MP3 = Path(__file__).parent / "audios" / "pending.mp3"
 
-    Generates a minimal WAV in memory using the standard library, decodes
-    the raw PCM samples, and writes them directly to a PyAudio output stream.
+
+def _play_beep(player: AudioPlayer) -> None:
+    """Play the wakeup acknowledgement sound (client/audios/wakeup.mp3).
+
+    Uses manager.get_pa() (not fresh_pa()) so any pre-opened capture stream
+    opened by the recorder remains valid after the beep finishes.
     """
-    import math
-    import struct
-    import wave
-    import io
+    import miniaudio
     import pyaudio
 
-    sample_rate = 22050
-    duration = 0.15  # seconds
-    freq = 880.0
-    num_samples = int(sample_rate * duration)
-    samples = [
-        int(32767 * math.sin(2 * math.pi * freq * i / sample_rate))
-        for i in range(num_samples)
-    ]
-    raw_pcm = struct.pack(f"{num_samples}h", *samples)
-
+    mp3_bytes = _WAKEUP_MP3.read_bytes()
+    result = miniaudio.decode(
+        mp3_bytes,
+        output_format=miniaudio.SampleFormat.SIGNED16,
+        nchannels=1,
+        sample_rate=24000,
+    )
+    pcm = bytes(result.samples)
     pa = manager.get_pa()
     stream = pa.open(
         format=pyaudio.paInt16,
         channels=1,
-        rate=sample_rate,
+        rate=24000,
         output=True,
     )
     try:
-        stream.write(raw_pcm)
+        stream.write(pcm)
     finally:
         stream.stop_stream()
         stream.close()
@@ -91,8 +91,14 @@ async def run() -> None:
     # Using asyncio.to_thread so the blocking player.play() doesn't stall the loop.
 
     async def on_status(msg: str) -> None:
-        """Log the status text (extend this to flash an LED, update a display, etc.)"""
+        """Log the status text and play the pending sound."""
         logger.info("⏳ %s", msg)
+        await asyncio.to_thread(player.play_or_feed, _PENDING_MP3.read_bytes())
+
+    async def on_tool_start(tool: str, args: dict) -> None:
+        """Play pending sound when a tool/agent call starts (v2 only)."""
+        logger.info("🔧 tool_start: %s", tool)
+        await asyncio.to_thread(player.play_or_feed, _PENDING_MP3.read_bytes())
 
     async def on_status_audio(mp3_bytes: bytes) -> None:
         """Play the server-synthesised status audio clip immediately.
@@ -111,6 +117,7 @@ async def run() -> None:
         on_status=on_status,
         on_status_audio=on_status_audio,
         on_audio_chunk=on_audio_chunk,
+        on_tool_start=on_tool_start,
     )
 
     if detector is None:

@@ -43,12 +43,13 @@ async def web_search(
             "description": "未配置 SERPAPI_KEY，无法进行联网搜索。",
         }
 
+    is_english = settings.WHISPER_LANGUAGE.lower() in ("en", "english")
     params = {
         "q": query,
         "api_key": api_key,
         "engine": settings.SERPAPI_ENGINE,
-        "hl": "zh-cn",
-        "gl": "cn",
+        "hl": "en" if is_english else "zh-cn",
+        "gl": "us" if is_english else "cn",
     }
 
     try:
