@@ -40,15 +40,15 @@ async def _get_adcode(city: str) -> str | None:
 
 @function_tool(
     description=(
-        "获取指定城市的天气信息，包括实况天气（当前气温、天气状况、风向、风力、湿度）"
-        "以及未来三天的天气预报（白天/夜晚天气、最高/最低温度）。"
-        "当用户询问天气、是否需要带伞、今天热不热、本周天气等问题时调用此工具。"
+        "Get weather information for a city, including current conditions "
+        "(temperature, weather, wind, humidity) and optional 3-day forecast. "
+        "Use this when the user asks about weather, temperature, rain, or whether to bring an umbrella."
     ),
     status_message="tool.weather.status",
 )
 async def get_weather(
-    city: Annotated[str, Field(description="城市名称，例如 '北京'、'上海'、'深圳'")],
-    forecast: Annotated[bool, Field(description="是否同时返回未来三天预报，默认 False 只返回实况")] = False,
+    city: Annotated[str, Field(description="City name, e.g. 'Shanghai', 'Beijing', 'London'")],
+    forecast: Annotated[bool, Field(description="Whether to include a 3-day forecast. Default False.")] = False,
 ) -> dict:
     """
     Fetch weather for *city* from the Amap Weather API.

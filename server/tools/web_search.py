@@ -21,13 +21,14 @@ _SERPAPI_URL = "https://serpapi.com/search.json"
 
 @function_tool(
     description=(
-        "在互联网上搜索最新信息。当问题需要实时数据、新闻、"
-        "价格、赛事结果等训练数据截止日期之后的内容时调用此工具。"
+        "Search the internet for up-to-date information. Use this when the question "
+        "requires real-time data, news, prices, sports results, or anything after the "
+        "model's training cutoff date."
     ),
     status_message="tool.web_search.status",
 )
 async def web_search(
-    query: Annotated[str, Field(description="搜索关键词或自然语言查询")],
+    query: Annotated[str, Field(description="Search keywords or natural-language query")],
 ) -> dict:
     """
     Search the web for *query* and return a brief summary.
