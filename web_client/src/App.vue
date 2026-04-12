@@ -223,7 +223,8 @@ function handleEvent(ev) {
 
       case 'status':
         processStatusText.value = ev.text || ''
-        playback.beginStatusAudio()
+        // v2 does not send status audio binary frames, so do NOT enter
+        // status-audio buffering mode — that would swallow reply audio.
         break
 
       case 'status_audio_done':
