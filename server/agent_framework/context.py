@@ -15,10 +15,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_SUMMARY_PROMPT = (
-    "请将以下对话历史浓缩为简短的中文摘要（不超过 200 字）。"
-    "保留关键信息、用户偏好和未完成的任务，省略寒暄和重复内容。\n\n"
-)
 
 
 @dataclass
@@ -91,17 +87,18 @@ class RunContext:
 
     async def _update_summary(self, evicted: list[dict], llm: BaseLLM) -> None:
         """Generate a rolling summary from evicted messages + prior summary."""
+        from ..language import tr
         parts: list[str] = []
         if self.summary:
             parts.append(f"[之前的摘要]\n{self.summary}\n")
-        parts.append("[被移除的对话]\n")
+        parts.append("尚未了解过去的对话\n")
         for msg in evicted:
             role = msg.get("role", "?")
             content = msg.get("content", "")
             if content:
                 parts.append(f"{role}: {content}")
 
-        prompt_text = _SUMMARY_PROMPT + "\n".join(parts)
+        prompt_text = tr("context.summary_prompt") + "\n".join(parts)
         try:
             self.summary = await llm.generate(
                 [{"role": "user", "content": prompt_text}]

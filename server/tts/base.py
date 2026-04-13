@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 
-
 class BaseTTS(ABC):
     @abstractmethod
     async def synthesize_stream(self, text: str) -> AsyncIterator[bytes]:

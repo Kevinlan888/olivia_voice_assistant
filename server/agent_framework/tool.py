@@ -27,7 +27,7 @@ class FunctionTool:
     description: str
     parameters_schema: dict          # OpenAI-format "parameters" object
     fn: Callable[..., Awaitable[Any]]
-    status_message: str = ""         # human-readable text shown while running
+    status_message: str = ""         # translation key or raw message shown while running
 
     # Pre-built definition dict (cached at creation time)
     _definition: dict = field(default=None, repr=False, compare=False)
@@ -49,6 +49,11 @@ class FunctionTool:
     def definition(self) -> dict:
         """OpenAI-format tool definition ready for ``tools=[...]``."""
         return self._definition
+
+    def get_status_message(self) -> str:
+        """Return the status message for the current language via tr()."""
+        from ..language import tr
+        return tr(self.status_message)
 
     async def __call__(self, **kwargs: Any) -> Any:
         return await self.fn(**kwargs)

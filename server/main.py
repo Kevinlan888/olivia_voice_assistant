@@ -334,6 +334,12 @@ async def _run_pipeline(
             reply_parts.append(event.token)
             for sentence in splitter.feed(event.token):
                 await tts_queue.put(sentence)
+        elif isinstance(event, (ev.HandoffEvent, ev.ToolCallStart)):
+            # Discard tokens from non-final LLM rounds (handoffs /
+            # tool calls).  These may contain reasoning fragments or
+            # tool-call JSON that must NOT be sent to TTS.
+            reply_parts.clear()
+            splitter.flush()  # discard buffered partial text
         elif isinstance(event, ev.AgentEnd):
             reply = event.output
             agent_name = event.agent_name

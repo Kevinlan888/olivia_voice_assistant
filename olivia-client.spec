@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('.env', '.'), ('client/models', 'client/models')]
+datas = [('.env', '.'), ('client/models', 'client/models'), ('client/audios', 'client/audios')]
 binaries = []
 hiddenimports = ['_cffi_backend']
 datas += collect_data_files('miniaudio')

@@ -36,6 +36,7 @@ from .events import (
 from .guardrail import GuardrailResult
 from .tool import FunctionTool
 from .tracing import LogTraceExporter, TraceCollector
+from ..language import tr
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,7 @@ class Runner:
             t0 = time.time()
             await self._emitter.emit(LLMStart(model=current_agent.model))
 
+            logger.info("[Runner] calling LLM, msg: %s", msgs[-1] if msgs else "[]")
             response = await self._call_llm(msgs, tool_defs)
 
             duration = (time.time() - t0) * 1000
@@ -234,10 +236,10 @@ class Runner:
         logger.warning("[Runner] hit max rounds (%d), requesting summary", self._max_rounds)
         msgs.append({
             "role": "user",
-            "content": "请根据以上工具调用结果，给我一个简洁的中文语音回复。",
+            "content": tr("runner.max_rounds_fallback"),
         })
         response = await self._llm.generate_with_tools(msgs, [])
-        reply = (response.get("content") or "处理完成。").strip()
+        reply = (response.get("content") or tr("runner.max_rounds_default_reply")).strip()
         await self._emitter.emit(AgentEnd(agent_name=current_agent.name, output=reply))
         return RunResult(output=reply, agent_name=current_agent.name, context=ctx)
 
@@ -257,7 +259,8 @@ class Runner:
                 seen.add(name)
                 tool = agent.get_tool(name)
                 if tool and tool.status_message:
-                    await self._emitter.emit(StatusMessage(text=tool.status_message))
+                    status_text = tool.get_status_message()
+                    await self._emitter.emit(StatusMessage(text=status_text))
 
         async def _run_one(tc: dict) -> dict:
             name = tc["function"]["name"]
