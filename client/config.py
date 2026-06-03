@@ -46,6 +46,7 @@ class ClientSettings(BaseSettings):
     PTT_PULL_UP: bool = True            # True = pull-up (button connects to GND)
 
     # ── Playback ──────────────────────────────────────────────────────────────
+    PLAYBACK_SAMPLE_RATE: int = 16000   # output sample rate (Hz); 16000 widely supported, miniaudio resamples as needed
     PLAYBACK_DEVICE_INDEX: int = -1     # -1 = system default
     STREAM_PLAYBACK: bool = True         # play assistant audio progressively
 
