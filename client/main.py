@@ -45,19 +45,21 @@ def _play_beep(player: AudioPlayer) -> None:
     import miniaudio
     import pyaudio
 
+    rate = settings.PLAYBACK_SAMPLE_RATE
+
     mp3_bytes = _WAKEUP_MP3.read_bytes()
     result = miniaudio.decode(
         mp3_bytes,
         output_format=miniaudio.SampleFormat.SIGNED16,
         nchannels=1,
-        sample_rate=24000,
+        sample_rate=rate,
     )
     pcm = bytes(result.samples)
     pa = manager.get_pa()
     stream = pa.open(
         format=pyaudio.paInt16,
         channels=1,
-        rate=24000,
+        rate=rate,
         output=True,
     )
     try:

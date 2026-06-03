@@ -21,8 +21,9 @@ from .config import settings
 logger = logging.getLogger(__name__)
 
 
-# Output parameters — must match what edge-tts produces (24 kHz mono int16).
-_OUT_RATE = 24000
+# Output parameters — must match what edge-tts produces (24 kHz mono int16),
+# but miniaudio will resample to settings.PLAYBACK_SAMPLE_RATE if needed.
+_OUT_RATE = settings.PLAYBACK_SAMPLE_RATE
 _OUT_CHANNELS = 1
 
 
