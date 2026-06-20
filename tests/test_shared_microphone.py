@@ -46,11 +46,38 @@ class _FakeStream:
 class _FakePA:
     """Mimics pyaudio.PyAudio with a fake stream."""
 
-    def __init__(self, stream: _FakeStream):
+    def __init__(
+        self,
+        stream: _FakeStream,
+        devices: list[dict] | None = None,
+        has_default_input: bool = True,
+    ):
         self._stream = stream
+        self._devices = devices or [
+            {"index": 0, "name": "default mic", "maxInputChannels": 1}
+        ]
+        self._default_input_device: dict | None = None
+        if has_default_input:
+            self._default_input_device = next(
+                (device for device in self._devices if device.get("maxInputChannels", 0) > 0),
+                None,
+            )
+        self.open_calls: list[dict] = []
 
     def open(self, **kwargs):
+        self.open_calls.append(kwargs)
         return self._stream
+
+    def get_default_input_device_info(self):
+        if self._default_input_device is None:
+            raise OSError("no default input device")
+        return self._default_input_device
+
+    def get_device_count(self):
+        return len(self._devices)
+
+    def get_device_info_by_index(self, index: int):
+        return self._devices[index]
 
     def terminate(self):
         pass
@@ -63,7 +90,7 @@ class TestSharedMicrophoneRead(unittest.TestCase):
     def test_read_returns_chunks(self, mock_manager):
         chunks = [_noise_chunk(), _silence_chunk(), _noise_chunk()]
         fake_stream = _FakeStream(chunks)
-        mock_manager.get_pa.return_value = _FakePA(fake_stream)
+        mock_manager.fresh_pa.return_value = _FakePA(fake_stream)
 
         mic = SharedMicrophone()
         result = mic.read_chunk()
@@ -74,7 +101,7 @@ class TestSharedMicrophoneRead(unittest.TestCase):
     def test_iterator_protocol(self, mock_manager):
         chunks = [_noise_chunk(), _silence_chunk()]
         fake_stream = _FakeStream(chunks)
-        mock_manager.get_pa.return_value = _FakePA(fake_stream)
+        mock_manager.fresh_pa.return_value = _FakePA(fake_stream)
 
         mic = SharedMicrophone()
         collected = []
@@ -94,7 +121,7 @@ class TestSharedMicrophoneClose(unittest.TestCase):
     @patch("client.shared_microphone.manager")
     def test_close_stops_and_closes_stream(self, mock_manager):
         fake_stream = _FakeStream([_silence_chunk()])
-        mock_manager.get_pa.return_value = _FakePA(fake_stream)
+        mock_manager.fresh_pa.return_value = _FakePA(fake_stream)
 
         mic = SharedMicrophone()
         mic.close()
@@ -104,7 +131,7 @@ class TestSharedMicrophoneClose(unittest.TestCase):
     @patch("client.shared_microphone.manager")
     def test_read_after_close_raises_stop_iteration(self, mock_manager):
         fake_stream = _FakeStream([_silence_chunk()])
-        mock_manager.get_pa.return_value = _FakePA(fake_stream)
+        mock_manager.fresh_pa.return_value = _FakePA(fake_stream)
 
         mic = SharedMicrophone()
         mic.close()
@@ -122,7 +149,7 @@ class TestSharedMicrophoneErrorRecovery(unittest.TestCase):
         fake_stream.read = MagicMock(
             side_effect=[OSError("read error"), _noise_chunk()]
         )
-        mock_manager.get_pa.return_value = _FakePA(fake_stream)
+        mock_manager.fresh_pa.return_value = _FakePA(fake_stream)
 
         mic = SharedMicrophone()
         result = mic.read_chunk()
@@ -141,8 +168,8 @@ class TestSharedMicrophoneErrorRecovery(unittest.TestCase):
         fake_stream.read = MagicMock(side_effect=[OSError("err")] * 5 + [_noise_chunk()])
         new_fake_stream = _FakeStream([_noise_chunk()])
         new_fake_pa = _FakePA(new_fake_stream)
-        mock_manager.get_pa.return_value = _FakePA(fake_stream)
-        mock_manager.fresh_pa.return_value = new_fake_pa
+        initial_fake_pa = _FakePA(fake_stream)
+        mock_manager.fresh_pa.side_effect = [initial_fake_pa, new_fake_pa]
 
         mic = SharedMicrophone()
         for _ in range(5):
@@ -150,7 +177,7 @@ class TestSharedMicrophoneErrorRecovery(unittest.TestCase):
             self.assertEqual(result, _silence_chunk())  # silence on error
 
         # The 5th error should have triggered recreation
-        mock_manager.fresh_pa.assert_called_once()
+        self.assertEqual(mock_manager.fresh_pa.call_count, 2)
         mic.close()
 
 
@@ -162,10 +189,28 @@ class TestSharedMicrophoneStartup(unittest.TestCase):
         """If PyAudio.open fails at init, the constructor raises."""
         fake_pa = _FakePA(_FakeStream([]))
         fake_pa.open = MagicMock(side_effect=OSError("device busy"))
-        mock_manager.get_pa.return_value = fake_pa
+        mock_manager.fresh_pa.return_value = fake_pa
 
         with self.assertRaises(OSError):
             SharedMicrophone()
+
+    @patch("client.shared_microphone.manager")
+    def test_startup_uses_first_input_device_when_no_default_exists(self, mock_manager):
+        """Startup falls back to the first input-capable device."""
+        fake_pa = _FakePA(
+            _FakeStream([_silence_chunk()]),
+            devices=[
+                {"index": 0, "name": "speaker", "maxInputChannels": 0},
+                {"index": 3, "name": "usb mic", "maxInputChannels": 1},
+            ],
+            has_default_input=False,
+        )
+        mock_manager.fresh_pa.return_value = fake_pa
+
+        mic = SharedMicrophone()
+
+        self.assertEqual(fake_pa.open_calls[0]["input_device_index"], 3)
+        mic.close()
 
 
 if __name__ == "__main__":

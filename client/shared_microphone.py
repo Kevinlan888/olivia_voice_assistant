@@ -112,18 +112,21 @@ class SharedMicrophone:
         reliably.
         """
         pa = manager.fresh_pa()
+        input_device_index = self._resolve_input_device_index(pa)
         self._stream = pa.open(
             format=pyaudio.paInt16,
             channels=self._channels,
             rate=self._rate,
             input=True,
+            input_device_index=input_device_index,
             frames_per_buffer=self._chunk_frames,
         )
         logger.info(
-            "SharedMicrophone opened: rate=%d channels=%d chunk_frames=%d",
+            "SharedMicrophone opened: rate=%d channels=%d chunk_frames=%d input_device_index=%s",
             self._rate,
             self._channels,
             self._chunk_frames,
+            input_device_index,
         )
 
     def _close_stream(self) -> None:
@@ -144,11 +147,35 @@ class SharedMicrophone:
         """
         self._close_stream()
         pa = manager.fresh_pa()
+        input_device_index = self._resolve_input_device_index(pa)
         self._stream = pa.open(
             format=pyaudio.paInt16,
             channels=self._channels,
             rate=self._rate,
             input=True,
+            input_device_index=input_device_index,
             frames_per_buffer=self._chunk_frames,
         )
         logger.info("SharedMicrophone stream recreated after errors")
+
+    def _resolve_input_device_index(self, pa: pyaudio.PyAudio) -> int | None:
+        """Return a usable input device index without relying on PortAudio defaults."""
+        try:
+            default_info = pa.get_default_input_device_info()
+        except Exception:
+            default_info = None
+
+        if default_info and default_info.get("maxInputChannels", 0) > 0:
+            return int(default_info["index"])
+
+        for index in range(pa.get_device_count()):
+            info = pa.get_device_info_by_index(index)
+            if info.get("maxInputChannels", 0) > 0:
+                logger.warning(
+                    "No default input device; falling back to input device %s (%s)",
+                    info.get("index", index),
+                    info.get("name", "unknown"),
+                )
+                return int(info.get("index", index))
+
+        raise OSError("No input audio device available")
