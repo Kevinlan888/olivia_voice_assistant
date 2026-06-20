@@ -37,6 +37,17 @@ _WAKEUP_MP3 = Path(__file__).parent / "audios" / "wakeup.mp3"
 _PENDING_MP3 = Path(__file__).parent / "audios" / "pending.mp3"
 
 
+def _request_shutdown(
+    stop_event: asyncio.Event,
+    run_task: asyncio.Task | None,
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Request shutdown from a signal handler or fallback path."""
+    stop_event.set()
+    if run_task is not None and not run_task.done():
+        run_task.cancel()
+
+
 def _play_beep(player: AudioPlayer) -> None:
     """Play the wakeup acknowledgement sound (client/audios/wakeup.mp3).
 
@@ -165,9 +176,10 @@ async def run() -> None:
     # ── Graceful shutdown ──────────────────────────────────────────────
     stop_event = asyncio.Event()
     signal_handlers_registered = False
+    run_task = asyncio.current_task()
 
     def _on_signal():
-        stop_event.set()
+        _request_shutdown(stop_event, run_task, loop)
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -291,7 +303,7 @@ async def run() -> None:
             if not signal_handlers_registered:
                 await asyncio.sleep(0)
 
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Keyboard interrupt received, shutting down.")
 
     finally:
