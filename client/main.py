@@ -211,8 +211,13 @@ async def run() -> None:
         prebuffer.clear()
 
     try:
-        for chunk in mic:
+        while True:
             if stop_event.is_set():
+                break
+
+            try:
+                chunk = await asyncio.to_thread(mic.read_chunk)
+            except StopIteration:
                 break
 
             # ── idle ───────────────────────────────────────────────────
