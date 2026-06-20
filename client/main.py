@@ -101,18 +101,29 @@ async def run() -> None:
     # recording finishes — the on_speech_chunk callback should NOT be
     # used for PTT, matching the original behavior.
     loop = asyncio.get_running_loop()
+    speech_chunk_queue: asyncio.Queue[bytes] = asyncio.Queue()
 
     def _on_speech_chunk(chunk: bytes) -> None:
         """Called from the recorder for each chunk once speech starts.
-        Submits an async send to the event loop and blocks until it
-        completes so chunks arrive in order."""
-        fut = asyncio.run_coroutine_threadsafe(
-            ws.send_audio_chunk(chunk), loop
-        )
-        try:
-            fut.result(timeout=1.0)
-        except Exception as exc:
-            logger.warning("Failed to send audio chunk: %s", exc)
+
+        The recorder runs inside the main event-loop thread, so this
+        callback must stay non-blocking. Chunks are queued here and
+        drained asynchronously by the main loop to preserve order.
+        """
+        speech_chunk_queue.put_nowait(chunk)
+
+    async def _flush_speech_chunk_queue() -> None:
+        """Send any queued speech chunks to the server in FIFO order."""
+        while not speech_chunk_queue.empty():
+            chunk = await speech_chunk_queue.get()
+            try:
+                await ws.send_audio_chunk(chunk)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to send audio chunk (%s): %r",
+                    type(exc).__name__,
+                    exc,
+                )
 
     recorder = AudioRecorder(
         on_speech_chunk=None if ptt_enabled else _on_speech_chunk,
@@ -247,6 +258,8 @@ async def run() -> None:
                     continue
 
                 done = recorder.append_chunk(chunk)
+                if not ptt_enabled:
+                    await _flush_speech_chunk_queue()
 
                 if done:
                     pcm = recorder.finish_utterance()
@@ -259,6 +272,7 @@ async def run() -> None:
 
                     # Wake-word mode: streaming upload already sent chunks,
                     # just send END and collect response
+                    await _flush_speech_chunk_queue()
                     audio_response = await ws.finish_upload()
 
                     if settings.STREAM_PLAYBACK:
