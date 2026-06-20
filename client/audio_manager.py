@@ -7,16 +7,31 @@ reusing a stale PyAudio instance after PortAudio re-enumerates devices
 raises OSError -9997 "Invalid sample rate".
 
 This module provides a process-wide singleton (``manager``) that owns
-the single PyAudio instance.  ``fresh_pa()`` always terminates the old
-instance and returns a new one, making stale-state errors impossible.
+the single PyAudio instance.
+
+Input stream ownership
+----------------------
+After the shared-microphone refactor, ``SharedMicrophone`` is the only
+module that opens an input stream.  It uses ``get_pa()`` at startup and
+``fresh_pa()`` only for runtime error recovery.  No other module should
+call ``pyaudio.open(..., input=True)``.
+
+Output stream usage
+-------------------
+Playback modules (``AudioPlayer``) may use ``fresh_pa()`` before opening
+output streams to avoid stale PortAudio state on some ALSA devices.
 
 Usage pattern
 -------------
-  Any stream (input or output):
-    pa = manager.fresh_pa()
-    stream = pa.open(...)
+  Input (SharedMicrophone only):
+    pa = manager.get_pa()
+    stream = pa.open(..., input=True)
     ...
-    stream.stop_stream(); stream.close()
+
+  Output (AudioPlayer):
+    pa = manager.fresh_pa()
+    stream = pa.open(..., output=True)
+    ...
 
   Process shutdown:
     manager.terminate_pa()

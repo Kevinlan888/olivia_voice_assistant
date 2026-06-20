@@ -27,6 +27,9 @@ class ClientSettings(BaseSettings):
     WAKE_WORD_KEYWORD_PATH: str = ""
     WAKE_WORD_THRESHOLD: float = 0.5      # sensitivity 0.0–1.0 (higher = more sensitive)
     WAKE_WORD_COOLDOWN_SECONDS: float = 1.0  # ignore immediate retriggers after detection
+    # Seconds of audio to retain before wake word detection for
+    # zero-gap transition into recording.  Set to 0 to disable.
+    WAKE_WORD_PREBUFFER_SECONDS: float = 0.75
 
     # ── Audio recording ───────────────────────────────────────────────────────
     SAMPLE_RATE: int = 16000

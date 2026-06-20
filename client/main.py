@@ -2,16 +2,16 @@
 Olivia Voice Assistant — Client Entry Point
 ============================================
 
-Flow:
-  1. Wait for wake word (offline, on-device)
-  2. Play a brief acknowledgement beep
-  3. Record the user's utterance (with VAD)
-  4. Send audio to server over WebSocket
-  5. Play back the server's TTS response
-  6. Return to step 1
+State machine flow:
+  idle → (wake word / PTT) → recording → waiting_response → idle
+
+The SharedMicrophone is the single owner of the input stream.
+WakeWordDetector and AudioRecorder consume PCM chunks supplied by
+the main loop — neither opens its own microphone stream.
 """
 
 import asyncio
+import collections
 import logging
 import signal
 import sys
@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .config import settings
 from .audio_manager import manager
+from .shared_microphone import SharedMicrophone
 from .wake_word import WakeWordDetector
 from .audio_recorder import AudioRecorder
 from .audio_player import AudioPlayer
@@ -39,8 +40,8 @@ _PENDING_MP3 = Path(__file__).parent / "audios" / "pending.mp3"
 def _play_beep(player: AudioPlayer) -> None:
     """Play the wakeup acknowledgement sound (client/audios/wakeup.mp3).
 
-    Uses manager.get_pa() (not fresh_pa()) so any pre-opened capture stream
-    opened by the recorder remains valid after the beep finishes.
+    Uses manager.get_pa() so any pre-opened capture stream
+    opened by SharedMicrophone remains valid after the beep finishes.
     """
     import miniaudio
     import pyaudio
@@ -70,6 +71,7 @@ def _play_beep(player: AudioPlayer) -> None:
 
 
 async def run() -> None:
+    # ── PTT setup ─────────────────────────────────────────────────────
     ptt_enabled = settings.PTT_GPIO_PIN >= 0
     ptt: PTTButton | None = None
     if ptt_enabled:
@@ -79,19 +81,45 @@ async def run() -> None:
             logger.warning("PTT button unavailable (%s) — falling back to wake-word mode.", exc)
             ptt_enabled = False
 
+    # ── Component initialization ───────────────────────────────────────
     # PTT mode disables wake-word detection.
     detector = (
         None
         if ptt_enabled or not settings.WAKE_WORD_KEYWORD.strip()
         else WakeWordDetector()
     )
-    recorder = AudioRecorder()
+
+    if detector is None and not ptt_enabled:
+        logger.warning(
+            "WAKE_WORD_KEYWORD is empty — skipping wake word, press Ctrl-C to quit."
+        )
+
+    mic = SharedMicrophone()
+
+    # ── Speech-chunk callback (for streaming upload, wake-word mode only) ─
+    # PTT mode sends audio in one batch via ws.process_audio() after
+    # recording finishes — the on_speech_chunk callback should NOT be
+    # used for PTT, matching the original behavior.
+    loop = asyncio.get_running_loop()
+
+    def _on_speech_chunk(chunk: bytes) -> None:
+        """Called from the recorder for each chunk once speech starts.
+        Submits an async send to the event loop and blocks until it
+        completes so chunks arrive in order."""
+        fut = asyncio.run_coroutine_threadsafe(
+            ws.send_audio_chunk(chunk), loop
+        )
+        try:
+            fut.result(timeout=1.0)
+        except Exception as exc:
+            logger.warning("Failed to send audio chunk: %s", exc)
+
+    recorder = AudioRecorder(
+        on_speech_chunk=None if ptt_enabled else _on_speech_chunk,
+    )
     player = AudioPlayer()
 
-    # ── Status callbacks ──────────────────────────────────────────────────────
-    # Called when the server starts executing a tool (before TTS is ready).
-    # Using asyncio.to_thread so the blocking player.play() doesn't stall the loop.
-
+    # ── Status callbacks ──────────────────────────────────────────────
     async def on_status(msg: str) -> None:
         """Log the status text and play the pending sound."""
         logger.info("⏳ %s", msg)
@@ -103,11 +131,7 @@ async def run() -> None:
         await asyncio.to_thread(player.play_or_feed, _PENDING_MP3.read_bytes())
 
     async def on_status_audio(mp3_bytes: bytes) -> None:
-        """Play the server-synthesised status audio clip immediately.
-
-        If stream playback is active, feed into the existing stream so we
-        don't kill the worker's PyAudio instance.
-        """
+        """Play the server-synthesised status audio clip immediately."""
         await asyncio.to_thread(player.play_or_feed, mp3_bytes)
 
     async def on_audio_chunk(mp3_chunk: bytes) -> None:
@@ -124,86 +148,130 @@ async def run() -> None:
         on_tool_start=on_tool_start,
     )
 
-    if detector is None:
-        logger.warning(
-            "WAKE_WORD_KEYWORD is empty — skipping wake word, press Ctrl-C to quit."
-        )
-
     # Pre-connect to reduce first-utterance latency
     await ws.connect()
 
-    # Graceful shutdown on Ctrl-C.
-    # On Windows, ProactorEventLoop may not implement add_signal_handler.
+    # ── Graceful shutdown ──────────────────────────────────────────────
     stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
     signal_handlers_registered = False
 
     def _on_signal():
         stop_event.set()
-        if detector:
-            detector.stop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, _on_signal)
             signal_handlers_registered = True
         except (NotImplementedError, RuntimeError):
-            # RuntimeError can occur in non-main-thread contexts.
             signal_handlers_registered = False
             break
 
+    # ── Prebuffer ─────────────────────────────────────────────────────
+    prebuffer_maxlen = int(
+        settings.WAKE_WORD_PREBUFFER_SECONDS * settings.SAMPLE_RATE / settings.CHUNK_FRAMES
+    )
+    prebuffer: collections.deque[bytes] = collections.deque(maxlen=prebuffer_maxlen)
+
+    # ── Cooldown counter (chunk-count, not wall-clock) ────────────────
+    cooldown_chunks = 0
+
+    # ── State machine ─────────────────────────────────────────────────
+    state = "idle"
+
+    def _reset_to_idle() -> None:
+        """Reset per-utterance state and return to idle."""
+        nonlocal state, cooldown_chunks
+        state = "idle"
+        cooldown_chunks = int(
+            settings.WAKE_WORD_COOLDOWN_SECONDS * settings.SAMPLE_RATE / settings.CHUNK_FRAMES
+        )
+        prebuffer.clear()
+
     try:
-        while not stop_event.is_set():
-            # ── Step 1: Wake word / PTT ──────────────────────────────────────
-            if ptt:
-                # PTT mode: block until button pressed, then record until released.
-                await asyncio.to_thread(ptt.wait_for_press)
-                await asyncio.to_thread(_play_beep, player)
-                raw_pcm = await asyncio.to_thread(recorder.record_ptt, ptt)
-            else:
-                if detector:
-                    await asyncio.to_thread(detector.wait_for_wake_word)
+        for chunk in mic:
+            if stop_event.is_set():
+                break
 
-                if stop_event.is_set():
-                    break
+            # ── idle ───────────────────────────────────────────────────
+            if state == "idle":
+                if cooldown_chunks > 0:
+                    cooldown_chunks -= 1
+                    # Still append to prebuffer during cooldown
+                    prebuffer.append(chunk)
+                    continue
 
-                # ── Step 2: Play acknowledgement beep concurrently with recording ────
-                # starts firing on_speech_chunk callbacks.
-                if not ws._is_connected():
-                    await ws.connect()
+                prebuffer.append(chunk)
 
-                def _on_speech_chunk(chunk: bytes) -> None:
-                    """Called from the recorder thread for each chunk once speech
-                    starts.  Submits an async send to the event loop and blocks
-                    until it completes so chunks arrive in order."""
-                    fut = asyncio.run_coroutine_threadsafe(
-                        ws.send_audio_chunk(chunk), loop
-                    )
-                    try:
-                        fut.result(timeout=1.0)
-                    except Exception as exc:
-                        logger.warning("Failed to send audio chunk: %s", exc)
+                # PTT entry
+                if ptt and ptt.is_pressed():
+                    if not ws._is_connected():
+                        await ws.connect()
+                    await asyncio.to_thread(_play_beep, player)
+                    recorder.start_utterance([])
+                    state = "recording"
+                    continue
 
-                beep_task = asyncio.create_task(asyncio.to_thread(_play_beep, player))
-                
-                raw_pcm = await asyncio.to_thread(recorder.record_streaming, _on_speech_chunk)
-                await beep_task
-            if not raw_pcm:
-                continue
+                # Wake word detection
+                if detector and detector.process_chunk(chunk):
+                    logger.info("Wake word detected → transitioning to recording")
+                    if not ws._is_connected():
+                        await ws.connect()
+                    # Play beep concurrently with recording
+                    beep_task = asyncio.create_task(asyncio.to_thread(_play_beep, player))
+                    recorder.start_utterance(list(prebuffer))
+                    state = "recording"
+                    continue
 
-            # ── Step 4: Finish upload and collect server response ─────────────
-            # PTT path: audio was not streamed, send it now via process_audio.
-            # Wake-word path: chunks were already uploaded; just send END.
-            if ptt:
-                audio_response = await ws.process_audio(raw_pcm)
-            else:
-                audio_response = await ws.finish_upload()
-            if settings.STREAM_PLAYBACK:
-                await asyncio.to_thread(player.stop_stream, True)
+            # ── recording ──────────────────────────────────────────────
+            elif state == "recording":
+                # PTT: stop recording when button is released
+                if ptt and not ptt.is_pressed():
+                    pcm = recorder.finish_utterance()
 
-            # ── Step 5: Play response ────────────────────────────────────────
-            if audio_response and not settings.STREAM_PLAYBACK:
-                await asyncio.to_thread(player.play, audio_response)
+                    if pcm is None:
+                        logger.info("Empty PTT utterance — returning to idle")
+                        _reset_to_idle()
+                        continue
+
+                    # PTT: send complete audio in one batch
+                    if not ws._is_connected():
+                        await ws.connect()
+                    audio_response = await ws.process_audio(pcm)
+
+                    if settings.STREAM_PLAYBACK:
+                        await asyncio.to_thread(player.stop_stream, True)
+                    if audio_response and not settings.STREAM_PLAYBACK:
+                        await asyncio.to_thread(player.play, audio_response)
+
+                    _reset_to_idle()
+                    continue
+
+                done = recorder.append_chunk(chunk)
+
+                if done:
+                    pcm = recorder.finish_utterance()
+
+                    if pcm is None:
+                        # No speech detected — discard and return to idle
+                        logger.info("Empty utterance — returning to idle")
+                        _reset_to_idle()
+                        continue
+
+                    # Wake-word mode: streaming upload already sent chunks,
+                    # just send END and collect response
+                    audio_response = await ws.finish_upload()
+
+                    if settings.STREAM_PLAYBACK:
+                        await asyncio.to_thread(player.stop_stream, True)
+
+                    if audio_response and not settings.STREAM_PLAYBACK:
+                        await asyncio.to_thread(player.play, audio_response)
+
+                    _reset_to_idle()
+
+            # ── waiting_response is implicit: finish_upload blocks until
+            #    the server response is complete, so we transition directly
+            #    from recording → idle after collecting the response.
 
             # Fallback for platforms without signal handler support.
             if not signal_handlers_registered:
@@ -213,13 +281,14 @@ async def run() -> None:
         logger.info("Keyboard interrupt received, shutting down.")
 
     finally:
-        await ws.disconnect()
+        mic.close()
         recorder.close()
-        player.close()
         if detector:
             detector.close()
+        player.close()
         if ptt:
             ptt.close()
+        await ws.disconnect()
         manager.terminate_pa()
         logger.info("Olivia client stopped.")
 
