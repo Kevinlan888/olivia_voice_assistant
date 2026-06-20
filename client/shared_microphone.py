@@ -102,8 +102,16 @@ class SharedMicrophone:
     # ── Internal ───────────────────────────────────────────────────────
 
     def _open_stream(self) -> None:
-        """Open the PyAudio input stream."""
-        pa = manager.get_pa()
+        """Open the PyAudio input stream.
+
+        Uses ``manager.fresh_pa()`` to guarantee a clean PortAudio
+        context.  On some ALSA configs (notably Raspberry Pi), the
+        device enumeration can be stale after library init (e.g.
+        pvporcupine), causing ``OSError -9996``.  ``fresh_pa()``
+        forces a terminate+recreate cycle that re-enumerates devices
+        reliably.
+        """
+        pa = manager.fresh_pa()
         self._stream = pa.open(
             format=pyaudio.paInt16,
             channels=self._channels,
