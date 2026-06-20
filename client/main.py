@@ -170,9 +170,6 @@ async def run() -> None:
         on_tool_start=on_tool_start,
     )
 
-    # Pre-connect to reduce first-utterance latency
-    await ws.connect()
-
     # ── Graceful shutdown ──────────────────────────────────────────────
     stop_event = asyncio.Event()
     signal_handlers_registered = False
@@ -188,6 +185,9 @@ async def run() -> None:
         except (NotImplementedError, RuntimeError):
             signal_handlers_registered = False
             break
+
+    # Pre-connect to reduce first-utterance latency
+    await ws.connect()
 
     # ── Prebuffer ─────────────────────────────────────────────────────
     prebuffer_maxlen = int(
