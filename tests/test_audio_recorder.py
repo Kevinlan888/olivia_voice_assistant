@@ -220,12 +220,36 @@ class TestAudioRecorderAppendChunk(unittest.TestCase):
         recorder.append_chunk(_silence_chunk())  # silence
         recorder.append_chunk(_speech_chunk())   # speech starts
 
-        # Callback should have been called for the speech chunk only
-        self.assertEqual(callback.call_count, 1)
+        # Upload stays continuous even before VAD confirms speech.
+        self.assertEqual(callback.call_count, 3)
 
         # More speech chunks
         recorder.append_chunk(_speech_chunk())
         recorder.append_chunk(_speech_chunk())
+        self.assertEqual(callback.call_count, 5)
+
+    @patch("client.audio_recorder.SileroVAD")
+    @patch("client.audio_recorder.settings")
+    def test_callback_runs_for_live_chunks_before_vad_confirms_speech(self, mock_settings, mock_vad_cls):
+        mock_settings.SAMPLE_RATE = 16000
+        mock_settings.CHUNK_FRAMES = 512
+        mock_settings.SILERO_SPEECH_THRESHOLD = 0.5
+        mock_settings.SILENCE_SECONDS = 0.8
+        mock_settings.MIN_RECORDING_SECONDS = 0.1
+        mock_settings.MAX_RECORDING_SECONDS = 15.0
+
+        fake_vad = _FakeVAD([0.05, 0.05, 0.9])
+        mock_vad_cls.return_value = fake_vad
+
+        callback = MagicMock()
+        from client.audio_recorder import AudioRecorder
+        recorder = AudioRecorder(on_speech_chunk=callback)
+        recorder.start_utterance([])
+
+        recorder.append_chunk(_speech_chunk())
+        recorder.append_chunk(_speech_chunk())
+        recorder.append_chunk(_speech_chunk())
+
         self.assertEqual(callback.call_count, 3)
 
 

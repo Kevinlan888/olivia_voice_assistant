@@ -120,8 +120,9 @@ class AudioRecorder:
             # Between neg_threshold and speech_threshold — hysteresis zone
             pass
 
-        # Forward chunk to server as soon as speech has started.
-        if self._speech_detected and self._on_speech_chunk:
+        # In wake-word mode, upload should stay continuous from utterance start.
+        # VAD still decides when to stop and whether the utterance was empty.
+        if self._on_speech_chunk:
             self._on_speech_chunk(chunk)
 
         # Stop on sustained silence — after speech was detected
