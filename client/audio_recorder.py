@@ -81,6 +81,10 @@ class AudioRecorder:
         self._silent_chunks = 0
         self._speech_detected = False
 
+        if self._on_speech_chunk:
+            for chunk in prebuffer:
+                self._on_speech_chunk(chunk)
+
         logger.info(
             "Utterance started: %d prebuffer chunks (%.1fs)",
             len(prebuffer),

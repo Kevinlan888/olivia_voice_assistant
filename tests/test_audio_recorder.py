@@ -4,8 +4,13 @@ Uses a fake Silero VAD to avoid real model dependency.
 """
 
 import struct
+import sys
+import types
 import unittest
 from unittest.mock import MagicMock, patch
+
+sys.modules.setdefault("client.silero_vad", types.SimpleNamespace(SileroVAD=object))
+import client.audio_recorder  # Ensure patch() can resolve client.audio_recorder.*
 
 
 def _silence_chunk(frame_length: int = 512) -> bytes:
@@ -89,6 +94,26 @@ class TestAudioRecorderStartUtterance(unittest.TestCase):
 
         fake_vad = mock_vad_cls.return_value
         self.assertEqual(fake_vad.reset_count, 2)
+
+    @patch("client.audio_recorder.SileroVAD", return_value=_FakeVAD())
+    @patch("client.audio_recorder.settings")
+    def test_prebuffer_forwarded_to_callback_on_start(self, mock_settings, mock_vad_cls):
+        mock_settings.SAMPLE_RATE = 16000
+        mock_settings.CHUNK_FRAMES = 512
+        mock_settings.SILERO_SPEECH_THRESHOLD = 0.5
+        mock_settings.SILENCE_SECONDS = 0.8
+        mock_settings.MIN_RECORDING_SECONDS = 1.0
+        mock_settings.MAX_RECORDING_SECONDS = 15.0
+
+        callback = MagicMock()
+
+        from client.audio_recorder import AudioRecorder
+        recorder = AudioRecorder(on_speech_chunk=callback)
+
+        prebuffer = [_speech_chunk(), _speech_chunk()]
+        recorder.start_utterance(prebuffer)
+
+        self.assertEqual(callback.call_count, 2)
 
 
 class TestAudioRecorderAppendChunk(unittest.TestCase):
