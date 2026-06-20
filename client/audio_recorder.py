@@ -1,14 +1,23 @@
 """
-Microphone recorder with Silero neural-network Voice Activity Detection (VAD).
+Chunk-driven microphone recorder with Silero neural-network VAD.
 
-Records until a configurable period of silence or a maximum duration,
-then returns the raw PCM bytes (int16, 16 kHz, mono).
+Assembles one utterance from externally supplied PCM chunks.
+After refactor, this module owns only VAD-based utterance assembly
+and completion rules. It does NOT open or close any microphone stream.
+
+Usage::
+
+    recorder = AudioRecorder(on_speech_chunk=my_callback)
+    recorder.start_utterance(prebuffer_chunks)
+    for chunk in mic:
+        if recorder.append_chunk(chunk):
+            break
+    pcm = recorder.finish_utterance()
 """
 
 import logging
-import pyaudio
+from typing import Callable
 
-from .audio_manager import manager
 from .config import settings
 from .silero_vad import SileroVAD
 
@@ -16,16 +25,18 @@ logger = logging.getLogger(__name__)
 
 
 class AudioRecorder:
-    """Capture one utterance from the microphone and return PCM bytes.
+    """Chunk-driven utterance assembler with Silero VAD.
 
-    Uses Silero VAD (neural network) for robust speech detection:
-      - Recording starts immediately.
-      - After the user stops speaking (speech probability stays below threshold
-        for SILENCE_SECONDS), recording stops automatically.
-      - Hard capped at MAX_RECORDING_SECONDS.
+    Receives PCM chunks from an external source (SharedMicrophone)
+    and assembles one utterance per session. Call ``start_utterance()``
+    to begin, feed chunks via ``append_chunk()``, and collect the
+    result with ``finish_utterance()``.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        on_speech_chunk: Callable[[bytes], None] | None = None,
+    ):
         self._rate = settings.SAMPLE_RATE
         self._chunk = settings.CHUNK_FRAMES
         self._speech_threshold = settings.SILERO_SPEECH_THRESHOLD
@@ -34,191 +45,119 @@ class AudioRecorder:
         self._min_chunks = int(settings.MIN_RECORDING_SECONDS * self._rate / self._chunk)
         self._max_chunks = int(settings.MAX_RECORDING_SECONDS * self._rate / self._chunk)
         self._vad = SileroVAD(sample_rate=self._rate)
+        self._on_speech_chunk = on_speech_chunk
+
+        # Per-utterance state (set by start_utterance)
+        self._frames: list[bytes] = []
+        self._silent_chunks = 0
+        self._total_chunks = 0
+        self._speech_detected = False
+
         logger.info(
             "AudioRecorder ready: rate=%d chunk=%d speech_thr=%.2f neg_thr=%.2f silence_chunks=%d",
             self._rate, self._chunk, self._speech_threshold, self._neg_threshold, self._silence_limit,
         )
 
-    def record(self) -> bytes:
-        """Open the mic, record one utterance with Silero VAD, return raw PCM bytes."""
-        pa = manager.get_pa()
-        stream = pa.open(
-            format=pyaudio.paInt16,
-            channels=settings.CHANNELS,
-            rate=self._rate,
-            input=True,
-            frames_per_buffer=self._chunk,
-        )
+    # ── Public API ─────────────────────────────────────────────────────
 
-        # Reset VAD state for a fresh utterance
-        self._vad.reset()
+    @property
+    def is_speech_started(self) -> bool:
+        """True once VAD has detected speech in the current utterance."""
+        return self._speech_detected
 
-        logger.info("Recording … (speak now, Silero VAD thr=%.2f)", self._speech_threshold)
+    def start_utterance(self, prebuffer: list[bytes]) -> None:
+        """Begin a new utterance, seeding it with prebuffer chunks
+        captured while listening for the wake word.
 
-        frames: list[bytes] = []
-        silent_chunks = 0
-        total_chunks = 0
-        speech_detected = False
-
-        log_interval = max(1, int(0.5 * self._rate / self._chunk))  # ~0.5s
-
-        try:
-            while total_chunks < self._max_chunks:
-                chunk = stream.read(self._chunk, exception_on_overflow=False)
-                frames.append(chunk)
-                total_chunks += 1
-
-                prob = self._vad(chunk)
-
-                if prob >= self._speech_threshold:
-                    speech_detected = True
-                    silent_chunks = 0
-                elif speech_detected and prob < self._neg_threshold:
-                    # Only count silence after speech has started,
-                    # and only when prob drops well below threshold
-                    silent_chunks += 1
-                elif speech_detected:
-                    # Between neg_threshold and speech_threshold — don't reset,
-                    # but don't increment either (hysteresis zone)
-                    pass
-
-                # Periodic logging for diagnostics
-                if total_chunks % log_interval == 0:
-                    logger.debug(
-                        "chunk=%d prob=%.3f speech=%s silent_run=%d/%d",
-                        total_chunks, prob, speech_detected, silent_chunks, self._silence_limit,
-                    )
-
-                # Stop on sustained silence — after speech was detected
-                # and the minimum recording duration has elapsed.
-                if (speech_detected
-                        and total_chunks >= self._min_chunks
-                        and silent_chunks >= self._silence_limit):
-                    logger.info("Silence detected — stopping recording.")
-                    # Trim trailing silent frames
-                    if silent_chunks <= len(frames):
-                        frames = frames[: len(frames) - silent_chunks]
-                    break
-        finally:
-            stream.stop_stream()
-            stream.close()
-
-        logger.info("Recorded %d chunks (%.1fs)", total_chunks, total_chunks * self._chunk / self._rate)
-        return b"".join(frames)
-
-    def record_streaming(self, on_speech_chunk) -> bytes:
-        """Record one utterance with VAD, forwarding each chunk via *on_speech_chunk*
-        as soon as speech is detected.
-
-        *on_speech_chunk* is called **synchronously from this thread** with each
-        raw PCM chunk (bytes) once speech activity begins.  Silent frames captured
-        before speech starts are buffered locally and never forwarded, so the
-        server only receives meaningful audio.
-
-        Returns the complete raw PCM bytes (identical to :meth:`record`).
-        The caller should use the returned bytes only as a fallback; normally
-        all audio has already been streamed to the server by the time this
-        method returns.
-        """
-        pa = manager.get_pa()
-        stream = pa.open(
-            format=pyaudio.paInt16,
-            channels=settings.CHANNELS,
-            rate=self._rate,
-            input=True,
-            frames_per_buffer=self._chunk,
-        )
-
-        self._vad.reset()
-
-        logger.info("Recording (streaming) … (speak now, Silero VAD thr=%.2f)", self._speech_threshold)
-
-        frames: list[bytes] = []
-        silent_chunks = 0
-        total_chunks = 0
-        speech_detected = False
-        log_interval = max(1, int(0.5 * self._rate / self._chunk))
-
-
-        try:
-            while total_chunks < self._max_chunks:
-                chunk = stream.read(self._chunk, exception_on_overflow=False)
-                frames.append(chunk)
-                total_chunks += 1
-
-                prob = self._vad(chunk)
-
-                if prob >= self._speech_threshold:
-                    speech_detected = True
-                    silent_chunks = 0
-                elif speech_detected and prob < self._neg_threshold:
-                    silent_chunks += 1
-                elif speech_detected:
-                    pass
-
-                # Forward chunk to server as soon as speech has started.
-                # This runs while the mic is still recording, hiding upload
-                # latency so the server can begin ASR the moment END arrives.
-                if speech_detected:
-                    on_speech_chunk(chunk)
-
-                if total_chunks % log_interval == 0:
-                    logger.debug(
-                        "chunk=%d prob=%.3f speech=%s silent_run=%d/%d",
-                        total_chunks, prob, speech_detected, silent_chunks, self._silence_limit,
-                    )
-
-                if (speech_detected
-                        and total_chunks >= self._min_chunks
-                        and silent_chunks >= self._silence_limit):
-                    logger.info("Silence detected — stopping recording.")
-                    if silent_chunks <= len(frames):
-                        frames = frames[: len(frames) - silent_chunks]
-                    break
-        finally:
-            stream.stop_stream()
-            stream.close()
-
-        logger.info("Recorded %d chunks (%.1fs)", total_chunks, total_chunks * self._chunk / self._rate)
-        return b"".join(frames)
-
-    def record_ptt(self, button) -> bytes:
-        """Record while the PTT button is held; stop when released.
+        Resets VAD state, stores prebuffer as the first frames, and
+        resets silence / chunk counters.
 
         Args:
-            button: PTTButton instance (already confirmed pressed before call).
-
-        Returns raw PCM bytes (int16, mono, SAMPLE_RATE Hz).
+            prebuffer: list of PCM chunks (bytes) to prepend.
         """
-        pa = manager.get_pa()
-        stream = pa.open(
-            format=pyaudio.paInt16,
-            channels=settings.CHANNELS,
-            rate=self._rate,
-            input=True,
-            frames_per_buffer=self._chunk,
+        self._vad.reset()
+        self._frames = list(prebuffer)
+        self._total_chunks = len(prebuffer)
+        self._silent_chunks = 0
+        self._speech_detected = False
+
+        if self._on_speech_chunk:
+            for chunk in prebuffer:
+                self._on_speech_chunk(chunk)
+
+        logger.info(
+            "Utterance started: %d prebuffer chunks (%.1fs)",
+            len(prebuffer),
+            len(prebuffer) * self._chunk / self._rate,
         )
 
-        # Flush stale buffer.
-        _flush = int(0.1 * self._rate / self._chunk)
-        for _ in range(_flush):
-            stream.read(self._chunk, exception_on_overflow=False)
+    def append_chunk(self, chunk: bytes) -> bool:
+        """Append one live chunk and return True if the utterance is
+        complete (silence after speech, or max duration reached).
 
-        logger.info("PTT recording …")
-        frames: list[bytes] = []
-        total_chunks = 0
+        If speech has been detected and an ``on_speech_chunk`` callback
+        is set, the chunk is forwarded immediately.
 
-        try:
-            while button.is_pressed() and total_chunks < self._max_chunks:
-                chunk = stream.read(self._chunk, exception_on_overflow=False)
-                frames.append(chunk)
-                total_chunks += 1
-        finally:
-            stream.stop_stream()
-            stream.close()
+        Args:
+            chunk: raw PCM bytes (CHUNK_FRAMES * 2 bytes).
 
-        logger.info("PTT released — recorded %d chunks (%.1fs)", total_chunks, total_chunks * self._chunk / self._rate)
-        return b"".join(frames)
+        Returns:
+            True if utterance is complete, False if still recording.
+        """
+        self._frames.append(chunk)
+        self._total_chunks += 1
+
+        prob = self._vad(chunk)
+
+        if prob >= self._speech_threshold:
+            self._speech_detected = True
+            self._silent_chunks = 0
+        elif self._speech_detected and prob < self._neg_threshold:
+            # Only count silence after speech has started,
+            # and only when prob drops well below threshold
+            self._silent_chunks += 1
+        elif self._speech_detected:
+            # Between neg_threshold and speech_threshold — hysteresis zone
+            pass
+
+        # In wake-word mode, upload should stay continuous from utterance start.
+        # VAD still decides when to stop and whether the utterance was empty.
+        if self._on_speech_chunk:
+            self._on_speech_chunk(chunk)
+
+        # Stop on sustained silence — after speech was detected
+        # and the minimum recording duration has elapsed.
+        if (self._speech_detected
+                and self._total_chunks >= self._min_chunks
+                and self._silent_chunks >= self._silence_limit):
+            logger.info("Silence detected — stopping recording.")
+            return True
+
+        # Hard cap at max duration
+        if self._total_chunks >= self._max_chunks:
+            logger.info("Max recording duration reached — stopping.")
+            return True
+
+        return False
+
+    def finish_utterance(self) -> bytes | None:
+        """Return the assembled PCM for the completed utterance,
+        or None if no valid speech was detected (empty utterance).
+
+        Trims trailing silence and validates minimum duration.
+        """
+        if not self._speech_detected:
+            logger.info("No speech detected in utterance — discarding.")
+            return None
+
+        # Trim trailing silent frames
+        if self._silent_chunks > 0 and self._silent_chunks <= len(self._frames):
+            self._frames = self._frames[:len(self._frames) - self._silent_chunks]
+
+        total = len(self._frames)
+        logger.info("Utterance complete: %d chunks (%.1fs)", total, total * self._chunk / self._rate)
+        return b"".join(self._frames)
 
     def close(self) -> None:
+        """Release resources (currently a no-op, kept for API compat)."""
         pass

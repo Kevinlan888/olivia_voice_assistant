@@ -27,11 +27,15 @@ class ClientSettings(BaseSettings):
     WAKE_WORD_KEYWORD_PATH: str = ""
     WAKE_WORD_THRESHOLD: float = 0.5      # sensitivity 0.0–1.0 (higher = more sensitive)
     WAKE_WORD_COOLDOWN_SECONDS: float = 1.0  # ignore immediate retriggers after detection
+    # Seconds of audio to retain before wake word detection for
+    # zero-gap transition into recording.  Set to 0 to disable.
+    WAKE_WORD_PREBUFFER_SECONDS: float = 0.75
 
     # ── Audio recording ───────────────────────────────────────────────────────
     SAMPLE_RATE: int = 16000
     CHANNELS: int = 1
     CHUNK_FRAMES: int = 512             # frames per PyAudio buffer read
+    INPUT_DEVICE_INDEX: int = -1        # -1 = auto-select input device
     # Silero VAD (neural-network voice activity detection)
     SILERO_SPEECH_THRESHOLD: float = 0.5  # prob ≥ this = speech (0.0–1.0)
     SILENCE_SECONDS: float = 0.8        # silence duration before stopping recording

@@ -493,9 +493,9 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-User=pi
+User=kevin
 WorkingDirectory=/opt/olivia-client
-ExecStart=/opt/olivia-client/venv/bin/python3 -m client.main
+ExecStart=/opt/olivia-client/olivia-client
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -512,6 +512,8 @@ sudo systemctl enable olivia-client
 sudo systemctl start olivia-client
 journalctl -u olivia-client -f
 ```
+
+> **常见问题**：如果遇到 `status=217/USER` 错误（`Failed to determine user credentials`），说明 service 文件中的 `User=` 指定的用户不存在。用 `whoami` 确认当前用户名，然后将 `User=` 改为实际用户名后执行 `sudo systemctl daemon-reload && sudo systemctl restart olivia-client`。
 
 ---
 
