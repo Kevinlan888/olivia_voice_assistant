@@ -51,12 +51,12 @@ class AudioPlayer:
     def play(self, mp3_bytes: bytes) -> None:
         """Decode MP3 and play synchronously via PyAudio (blocks until done).
 
-        MUST NOT be called while a stream worker is active — it would kill
-        the worker's PyAudio instance.  Use play_or_feed() for safe dispatch.
+        MUST NOT be called while a stream worker is active. Use
+        play_or_feed() for safe dispatch.
         """
         with self._lock:
             pcm = _decode_mp3(mp3_bytes)
-            pa = manager.fresh_pa()
+            pa = manager.get_pa()
             stream = pa.open(
                 format=pyaudio.paInt16,
                 channels=_OUT_CHANNELS,
@@ -134,7 +134,7 @@ class AudioPlayer:
         if q is None:
             return
 
-        pa = manager.fresh_pa()
+        pa = manager.get_pa()
 
         freq = _OUT_RATE
         channels = _OUT_CHANNELS
