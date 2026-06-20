@@ -160,6 +160,10 @@ class SharedMicrophone:
 
     def _resolve_input_device_index(self, pa: pyaudio.PyAudio) -> int | None:
         """Return a usable input device index without relying on PortAudio defaults."""
+        configured_index = getattr(settings, "INPUT_DEVICE_INDEX", -1)
+        if configured_index is not None and int(configured_index) >= 0:
+            return int(configured_index)
+
         try:
             default_info = pa.get_default_input_device_info()
         except Exception:

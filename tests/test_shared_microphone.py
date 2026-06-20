@@ -212,6 +212,23 @@ class TestSharedMicrophoneStartup(unittest.TestCase):
         self.assertEqual(fake_pa.open_calls[0]["input_device_index"], 3)
         mic.close()
 
+    @patch("client.shared_microphone.settings")
+    @patch("client.shared_microphone.manager")
+    def test_startup_uses_configured_input_device_index(self, mock_manager, mock_settings):
+        """Explicit INPUT_DEVICE_INDEX overrides automatic device resolution."""
+        mock_settings.SAMPLE_RATE = 16000
+        mock_settings.CHANNELS = 1
+        mock_settings.CHUNK_FRAMES = 512
+        mock_settings.INPUT_DEVICE_INDEX = 7
+
+        fake_pa = _FakePA(_FakeStream([_silence_chunk()]))
+        mock_manager.fresh_pa.return_value = fake_pa
+
+        mic = SharedMicrophone()
+
+        self.assertEqual(fake_pa.open_calls[0]["input_device_index"], 7)
+        mic.close()
+
 
 if __name__ == "__main__":
     unittest.main()
